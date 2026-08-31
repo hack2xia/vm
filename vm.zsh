@@ -188,13 +188,25 @@ _vm_snap_notes() {
   done
 }
 
-# 状态表格的一行：$1 = 短名，$2 = 圆点（含颜色），$3 = 运行状态
+# 查询 VMware Tools 状态。checkToolsState 在关机/挂起状态下也能查，
+# 但挂起（paused）时可能返回 unknown；输出只认白名单，避免把报错当状态。
+_vm_tools() {
+  local s
+  s="$(vmrun -T fusion checkToolsState "$1" 2>/dev/null)"
+  case "$s" in
+    installed|notInstalled|running) print -rn -- "$s" ;;
+    *)                              print -rn -- "unknown" ;;
+  esac
+}
+
+# 状态表格的一行：$1 = 短名，$2 = 圆点（含颜色），$3 = 运行状态，$4 = Tools 状态
 _vm_status_line() {
-  local n="$1" m="$2" s="$3" a b c
+  local n="$1" m="$2" s="$3" t="$4" a b c d
   a="${(r:14:)${${n}//\%/%%}}"
   b="${(r:14:)${${VM_DISPLAY[$n]}//\%/%%}}"
   c="${(r:8:)${VM_STATE[$n]:-未知}}"
-  print -rP -- "  $m %F{cyan}${a}%f ${b} ${c} $s"
+  d="${(r:13:)${t:-unknown}}"
+  print -rP -- "  $m %F{cyan}${a}%f ${b} ${c} ${d} $s"
 }
 
 # ── 5. 帮助 ────────────────────────────────────────────────────
@@ -210,16 +222,17 @@ vm — VMware Fusion (headless) 管理
 
 电源:
   vm up <name>         启动（start nogui）
-  vm down <name>       关机（stop soft，需 VMware Tools）
-  vm kill <name>       强制断电（stop hard）
+  vm down <name>       关机（stop soft，需 VMware Tools；失败可 vm kill）
+  vm kill <name>       强制断电（stop hard，不需要 VMware Tools）
   vm suspend <name>    挂起（suspend）
   vm pause <name>      暂停（pause）
   vm unpause <name>    恢复（unpause）
-  vm reset <name>      复位（reset soft）
+  vm reset <name>      复位（reset soft，需 VMware Tools）
 
 网络 / 登录:
-  vm ip [-w] <name>             获取客户机 IP；-w = -wait 等待就绪
+  vm ip [-w] <name>             获取客户机 IP；-w = -wait 等待就绪（会阻塞）
   vm ssh [-w] <name> [user]     拿 IP 后直接 ssh（默认用当前用户名）
+  ※ 两者都依赖 VMware Tools：不装 Tools 时立即失败；加 -w 则会一直阻塞等 Tools
 
 快照:
   vm snap list <name>               列出快照（listSnapshots + .vmsd 备注）
@@ -247,11 +260,19 @@ vm() {
     up)      local vmx; vmx=$(_vm_resolve "$1") || return 1
              _vm_power start "$vmx" nogui ;;
     down)    local vmx; vmx=$(_vm_resolve "$1") || return 1
-             _vm_power stop "$vmx" soft ;;
+             local rc
+             _vm_power stop "$vmx" soft
+             rc=$?
+             (( rc != 0 )) && print -P "%F{yellow}! soft 关机失败：常见原因是未装/未启动 VMware Tools（vm status 可查）；确认无未保存数据后可改 vm kill $1 强制断电%f" >&2
+             return $rc ;;
     kill)    local vmx; vmx=$(_vm_resolve "$1") || return 1
              _vm_power stop "$vmx" hard ;;
     reset)   local vmx; vmx=$(_vm_resolve "$1") || return 1
-             _vm_power reset "$vmx" soft ;;
+             local rc
+             _vm_power reset "$vmx" soft
+             rc=$?
+             (( rc != 0 )) && print -P "%F{yellow}! soft 复位失败：常见原因是未装/未启动 VMware Tools（vm status 可查）%f" >&2
+             return $rc ;;
     suspend) local vmx; vmx=$(_vm_resolve "$1") || return 1
              _vm_power suspend "$vmx" ;;
     pause)   local vmx; vmx=$(_vm_resolve "$1") || return 1
@@ -299,7 +320,7 @@ vm() {
         else
           mark="%F{white}○%f"; state="未运行"
         fi
-        _vm_status_line "$name" "$mark" "$state"
+        _vm_status_line "$name" "$mark" "$state" "$(_vm_tools "$vmx")"
         print -rP "      .vmx: ${${VM_VMX[$name]}//\%/%%}"
       else
         (( ${#VM_VMX} )) || { print -P "%F{yellow}未发现任何虚拟机，执行: vm scan%f"; return 0; }
@@ -310,7 +331,7 @@ vm() {
           else
             mark="%F{white}○%f"; state="未运行"
           fi
-          _vm_status_line "$name" "$mark" "$state"
+          _vm_status_line "$name" "$mark" "$state" "$(_vm_tools "${VM_VMX[$name]}")"
         done
       fi
       ;;
