@@ -283,7 +283,11 @@ eq "不存在快照 rc=1" "1" "$rc"
 
 # ── 补全注册时序 ─────────────────────────────────────────────────
 print -P "%F{cyan}== 补全注册时序 ==%f"
-# 顺序一（compinit 先行 → compdef 直接注册）依赖交互 shell，这里无法仿真；
+# 顺序一（compinit 先行）：用假 compdef 模拟 compinit 已执行，
+# source 时应立刻收到 compdef _vm_comp vm 的注册调用。
+# VM_DIR/VM_INVENTORY/PATH 已 export，子进程直接继承。
+out="$(zsh -c 'compdef() { print -r -- "compdef $*" }; source "$0" 2>/dev/null' "$VM_ZSH")"
+eq "compinit 先行时自动 compdef 注册" "compdef _vm_comp vm" "$out"
 # 顺序二（compinit 后置）靠 fpath + _vm 文件，验证两条前提：
 _vm_repo="${VM_ZSH:A:h}"
 # 不能用 [[ ":$fpath:" == ... ]] 判断：$fpath 标量展开是空格连接，必须用 (Ie) 精确成员判断
