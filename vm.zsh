@@ -68,6 +68,8 @@ vm_scan() {
   # 3b. 再用 Fusion 清单补全：.vmx 路径以清单为准（macOS 卷大小写不敏感，两种写法
   #     等价），显示名与状态也以清单为准；status 与 vmrun list 的比对统一转小写，
   #     不受两边大小写差异影响。
+  #     按 id 排序遍历，保证「保留首个」的结果稳定可复现。
+  local invpath
   if [[ -f "$VM_INVENTORY" ]]; then
     while IFS= read -r line; do
       key="${line%% *}"
@@ -80,20 +82,30 @@ vm_scan() {
     done < "$VM_INVENTORY"
   fi
 
-  for id in ${(k)cfg}; do
+  for id in ${(ok)cfg}; do
     [[ -n "${cfg[$id]}" ]] || continue          # 清单里已移除的占位条目
-    invname="${cfg[$id]:h:t}"; invname="${invname%.vmwarevm}"
+    invpath="${cfg[$id]}"
+    invname="${invpath:h:t}"; invname="${invname%.vmwarevm}"
     [[ -n "$invname" ]] || continue
     name="${seen[${invname:l}]}"
     if [[ -z "$name" ]]; then
       name="$invname"                            # 不在默认目录里，仅清单可见
       seen[${name:l}]="$name"
-    fi
-    if [[ -n "${filled[$name]}" ]]; then
-      print -P "%F{yellow}! 清单里 $name 有重复条目，保留首个%f" >&2
+    elif [[ -n "${filled[$name]}" ]]; then
+      # 同名条目已处理过：路径相同算重复；路径不同是两台不同的 VM，
+      # 仅靠短名无法区分，保留首个并警告，不静默合并
+      if [[ "${VM_VMX[$name]:A}" == "${invpath:A}" ]]; then
+        print -P "%F{yellow}! 清单里 $name 有重复条目，保留首个%f" >&2
+      else
+        print -P "%F{yellow}! 短名冲突: $name 同时对应 ${VM_VMX[$name]} 和 ${invpath}，仅保留前者%f" >&2
+      fi
+      continue
+    elif [[ ! -f "$invpath" ]]; then
+      # 磁盘扫描已找到同名 VM，而清单路径已失效：保留磁盘结果
+      print -P "%F{yellow}! 清单里 $name 的路径失效，保留磁盘扫描的: ${VM_VMX[$name]}%f" >&2
       continue
     fi
-    VM_VMX[$name]="${cfg[$id]}"                  # 清单路径优先（大小写正确）
+    VM_VMX[$name]="$invpath"                     # 清单路径优先（大小写正确）
     VM_DISPLAY[$name]="${disp[$id]:-$name}"
     VM_STATE[$name]="${st[$id]}"
     filled[$name]=1
@@ -140,14 +152,21 @@ _vm_power() {
 }
 
 # 取客户机 IP：$1 = vmx，$2 非空则带 -wait。
-# 注意 vmrun 把报错也写进 stdout（但 rc != 0），所以只从输出里提 IPv4，
+# 注意 vmrun 把报错也写进 stdout（但 rc != 0），所以先要求 rc == 0，
+# 再从输出里提 IPv4 且四段 octet 都 ≤255，避免把错误文本里的数字串当 IP；
 # 拿不到就把原始输出转给 stderr，别让调用方把报错当 IP 用。
 _vm_ip() {
-  local vmx="$1" flag="" out ip
+  local vmx="$1" flag="" out ip rc o
   [[ -n "$2" ]] && flag="-wait"
   _vm_echo getGuestIPAddress "$vmx" $flag
   out="$(vmrun -T fusion getGuestIPAddress "$vmx" $flag)"
-  ip="$(print -rn -- "$out" | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1)"
+  rc=$?
+  if (( rc == 0 )); then
+    ip="$(print -rn -- "$out" | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -1)"
+    for o in ${(s:.:)ip}; do
+      (( 10#$o <= 255 )) || { ip=""; break }
+    done
+  fi
   if [[ -z "$ip" ]]; then
     [[ -n "$out" ]] && print -rP "%F{red}${${out//\%/%%}}%f" >&2
     return 1
@@ -163,6 +182,7 @@ _vm_parse_wait() {
   while (( $# )); do
     case "$1" in
       -w|--wait) _vm_waitflag=1 ;;
+      --)        rest+=("$@"); break ;;   # -- 之后是透传参数（如 ssh 选项），不再解析
       *)         rest+=("$1") ;;
     esac
     shift
@@ -189,6 +209,13 @@ _vm_snap_notes() {
             | sed -E 's/^[^=]*= *"//; s/[[:space:]]*"[[:space:]]*$//')
     print -rP "  %F{cyan}${${sname:-<未命名>}//\%/%%}%f  %F{yellow}备注:%f ${${sdesc:-<无>}//\%/%%}"
   done
+}
+
+# 从 .vmsd 提取快照名（解析规则与 _vm_snap_notes 一致），一行一个
+_vm_snap_names() {
+  [[ -f "$1" ]] || return 0
+  grep -E '^snapshot[0-9]+\.displayName' "$1" 2>/dev/null | \
+    sed -E 's/^[^=]*= *"//; s/[[:space:]]*"[[:space:]]*$//'
 }
 
 # 查询 VMware Tools 状态。checkToolsState 在关机/挂起状态下也能查，
@@ -235,9 +262,11 @@ vm — VMware Fusion (headless) 管理
 
 网络 / 登录:
   vm ip [-w] <name>             获取客户机 IP；-w = -wait 等待就绪（会阻塞）
-  vm ssh [-w] <name> [user] [-- ssh参数...]
+  vm ssh [-w] <name> [user] [-- ssh选项...] [远程命令...]
                                 拿 IP 后直接 ssh（默认用当前用户名）；
-                                -- 后的参数原样透传给 ssh，如: vm ssh kali root -- -p 2222
+                                -- 后的参数作为 ssh 选项放在目标地址之前，
+                                如: vm ssh kali root -- -p 2222
+                                不带 -- 时其余参数作为远程命令执行
   ※ 两者都依赖 VMware Tools：不装 Tools 时立即失败；加 -w 则会一直阻塞等 Tools
 
 快照:
@@ -247,7 +276,9 @@ vm — VMware Fusion (headless) 管理
   vm snap revert <name> <snap>      回滚到快照（revertToSnapshot）
 
 克隆:
-  vm clone <src> <新名> [full|linked]   从现有 VM 克隆（linked 需源机有快照；完成后自动纳入管理）
+  vm clone <src> <新名> [full|linked] [snapshot]
+                                克隆（linked 需源机有快照；指定 snapshot 时基于该
+                                快照克隆，缺省用 vmrun 默认行为；完成后自动纳入管理）
 
 帮助:
   vm help              显示本帮助
@@ -302,14 +333,17 @@ vm() {
       _vm_parse_wait "$@"
       set -- "${reply[@]}"
       local vmx; vmx=$(_vm_resolve "${1:-}") || return 1
-      local user="${2:-}" ip
-      # 语法: vm ssh [-w] <name> [user] [-- ssh参数...]，-- 后的参数原样透传
-      if [[ "$user" == "--" ]]; then
-        user=""
-        shift 2
+      shift
+      local user="" ip
+      local -a pre=() post=()
+      if (( $# )) && [[ "$1" != "--" ]]; then
+        user="$1"; shift
+      fi
+      if (( $# )) && [[ "$1" == "--" ]]; then
+        shift
+        pre=("$@")     # -- 后全是 ssh 选项：OpenSSH 要求选项在 destination 之前
       else
-        if (( $# >= 2 )); then shift 2; else shift; fi
-        [[ "${1:-}" == "--" ]] && shift
+        post=("$@")    # 不带 --：其余参数作为远程命令，放 destination 之后
       fi
       ip=$(_vm_ip "$vmx" "$_vm_waitflag")
       if [[ -z "$ip" ]]; then
@@ -319,7 +353,7 @@ vm() {
       local target="$ip"
       [[ -n "$user" ]] && target="$user@$ip"
       print -rP "%F{cyan}➤ ssh ${target//\%/%%}%f" >&2
-      ssh "$target" "$@"
+      ssh "${(@)pre}" "$target" "${(@)post}"
       ;;
 
     status)
@@ -363,10 +397,12 @@ vm() {
       local sub="${1:-}"; shift 2>/dev/null
       case "$sub" in
         list)
-          local vmx; vmx=$(_vm_resolve "${1:-}") || return 1
+          local vmx rc; vmx=$(_vm_resolve "${1:-}") || return 1
           _vm_echo listSnapshots "$vmx"
           vmrun -T fusion listSnapshots "$vmx"
+          rc=$?
           _vm_snap_notes "${vmx:r}.vmsd"
+          return $rc   # listSnapshots 失败不能被 .vmsd 备注解析掩盖
           ;;
         create|delete|revert)
           local vmx; vmx=$(_vm_resolve "${1:-}") || return 1
@@ -389,31 +425,61 @@ vm() {
       ;;
 
     clone)
-      local src="${1:-}" newname="${2:-}" mode="${3:-full}"
+      local src="${1:-}" newname="${2:-}" mode="${3:-full}" snapname="${4:-}"
       if [[ -z "$src" || -z "$newname" ]]; then
-        print -P "%F{red}✗ 用法: vm clone <src> <新名> [full|linked]%f" >&2
+        print -P "%F{red}✗ 用法: vm clone <src> <新名> [full|linked] [snapshot]%f" >&2
         return 1
       fi
       if [[ "$mode" != "full" && "$mode" != "linked" ]]; then
         print -P "%F{red}✗ 克隆类型必须是 full 或 linked，收到: $mode%f" >&2
         return 1
       fi
+      # 新名必须是单个安全文件名：拒绝 / 、. 、.. 和控制字符，
+      # 否则目标路径会逃逸出 VM_DIR（路径穿越）
+      if [[ "$newname" == */* || "$newname" == . || "$newname" == .. || \
+            "$newname" == *[[:cntrl:]]* ]]; then
+        print -P "%F{red}✗ 新名必须是单个文件名（不含 / 和控制字符，不能是 . 或 ..）: ${newname//\%/%%}%f" >&2
+        return 1
+      fi
       local svmx; svmx=$(_vm_resolve "$src") || return 1
+      # 短名被占用会导致克隆后两台 VM 无法区分，直接拒绝
+      if [[ -n "${VM_LC[${newname:l}]}" ]]; then
+        print -P "%F{red}✗ 短名已被占用: ${newname//\%/%%}（vm vms 查看）%f" >&2
+        return 1
+      fi
       # 注意：zsh 的 local 同一语句里后面的赋值展开时前面变量还未生效，必须分行
       local dstdir="$VM_DIR/$newname.vmwarevm"
       local dst="$dstdir/$newname.vmx"
-      if [[ -e "$dst" ]]; then
-        print -P "%F{red}✗ 目标已存在: ${dst//\%/%%}%f" >&2
+      # 双重越界保险：VM_DIR 内有符号链接时，规范化后目标必须仍在 VM_DIR 里
+      local realdir="${${VM_DIR%/}:A}" realdst="${dstdir:A}"
+      if [[ "$realdst" != "$realdir"/* ]]; then
+        print -P "%F{red}✗ 目标路径越界: ${dstdir//\%/%%}%f" >&2
         return 1
       fi
-      if [[ "$mode" == "linked" ]] && \
-         ! grep -q '^snapshot[0-9]*\.displayName' "${svmx:r}.vmsd" 2>/dev/null; then
-        print -P "%F{red}✗ linked 克隆要求源虚拟机至少有一个快照，先执行: vm snap create ${src//\%/%%} <snap>%f" >&2
+      # 拒绝整个目标 bundle（目录或符号链接），而不只是 .vmx
+      if [[ -e "$dstdir" || -L "$dstdir" ]]; then
+        print -P "%F{red}✗ 目标已存在: ${dstdir//\%/%%}%f" >&2
         return 1
+      fi
+      local -a cloneargs=("$svmx" "$dst" "$mode" -cloneName="$newname")
+      if [[ "$mode" == "linked" ]]; then
+        if [[ -n "$snapname" ]]; then
+          local -a snames
+          snames=("${(@f)$(_vm_snap_names "${svmx:r}.vmsd")}")
+          if [[ -z "${snames[(re)$snapname]}" ]]; then
+            print -P "%F{red}✗ 源虚拟机没有名为 ${snapname//\%/%%} 的快照，先执行: vm snap list ${src//\%/%%}%f" >&2
+            return 1
+          fi
+          cloneargs+=(-snapshot="$snapname")
+        elif ! grep -q '^snapshot[0-9]*\.displayName' "${svmx:r}.vmsd" 2>/dev/null; then
+          print -P "%F{red}✗ linked 克隆要求源虚拟机至少有一个快照，先执行: vm snap create ${src//\%/%%} <snap>%f" >&2
+          return 1
+        fi
+        # 不指定快照名时不传 -snapshot，交由 vmrun 默认行为
       fi
       mkdir -p "$dstdir" || return 1   # vmrun clone 不保证创建目标目录
-      _vm_echo clone "$svmx" "$dst" "$mode" -cloneName="$newname"
-      vmrun -T fusion clone "$svmx" "$dst" "$mode" -cloneName="$newname"
+      _vm_echo clone "${(@)cloneargs}"
+      vmrun -T fusion clone "${(@)cloneargs}"
       local rc=$?
       if (( rc == 0 )); then
         print -P "%F{green}✓ 克隆完成，重新扫描以纳入管理…%f"
@@ -506,6 +572,15 @@ _vm_comp() {
           case $CURRENT in
             2) _wanted vms expl '源虚拟机' compadd -a vms ;;
             4) _values '克隆类型' 'full[完整克隆]' 'linked[链接克隆]' ;;
+            5)
+              # linked 克隆可指定基于哪个快照
+              local vmx snames=()
+              vmx="${VM_VMX[${VM_LC[${words[2]:l}]}]}"
+              if [[ -n "$vmx" ]]; then
+                snames=("${(@f)$(_vm_snap_names "${vmx:r}.vmsd")}")
+              fi
+              (( ${#snames} )) && _wanted snaps expl '快照名' compadd -a snames
+              ;;
           esac
           ;;
         ip|ssh)
@@ -521,8 +596,15 @@ _vm_comp() {
       ;;
   esac
 }
-# .zshrc 里 compinit 可能在本文件之后才执行，故先判断 compdef 是否可用
+# 补全注册双保险，覆盖两种 compinit 时序：
+#   1) compinit 已在本文件之前执行 → compdef 可用，直接注册；
+#   2) compinit 尚未执行 → 把本文件所在目录加入 fpath，目录里的 _vm 文件
+#      带 #compdef 头，之后 compinit 扫描 fpath 时自动注册。
+_vm_compfile="${(%):-%x}"        # 本文件路径（source 场景下由 %x 取得）
+_vm_compdir="${_vm_compfile:A:h}" # 规范化（消解 .. 与符号链接）后取目录
+# 注意不能用 [[ ":$fpath:" == ... ]] 判断：$fpath 标量展开是空格连接，冒号比对必失效
 (( $+functions[compdef] )) && compdef _vm_comp vm
+(( ${fpath[(Ie)$_vm_compdir]} )) || fpath=("$_vm_compdir" "$fpath[@]")
 
 # ── 8. source 时初始化扫描一次 ─────────────────────────────────
 vm_scan

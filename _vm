@@ -1,0 +1,6 @@
+#compdef vm
+# vm.zsh 补全的 fpath 入口：vm.zsh 会把本文件所在目录加入 fpath，
+# compinit 在其之后执行时扫描到此文件即完成注册。
+# 真正的补全逻辑在 vm.zsh 里的 _vm_comp。
+(( $+functions[_vm_comp] )) && _vm_comp "$@"
+return 0
