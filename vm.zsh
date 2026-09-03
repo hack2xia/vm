@@ -3,6 +3,12 @@
 #
 # 由 ~/.zshrc 通过 `[ -f ~/.config/vm/vm.zsh ] && source ~/.config/vm/vm.zsh` 引入。
 #
+# 定位：轻量级「VM 生命周期管理」工具——发现/状态、电源、IP、快照（含备注）、
+#       克隆与删除；不是 vmrun 的全功能封装，也不追求对 vmrun 的覆盖率。
+# 明确不做：ssh 包装、客户机内命令执行/文件操作（仅保留 IP 与 Tools 状态等
+#       只读查询）、网络适配器与主机虚拟网络配置——这些交给原生工具更稳妥。
+# 安全性优先：同名冲突的短名拒绝执行破坏性命令；vm delete 需显式确认。
+#
 # 设计要点：
 #   * 不提供任何短别名（kali-up 等一律不要），统一走 `vm` 命令。
 #   * 每次执行前回显原始 `vmrun` 命令，防止忘记原用法。
@@ -28,15 +34,16 @@ typeset -A VM_VMX=()      # 短名 → .vmx 绝对路径（真实大小写）
 typeset -A VM_DISPLAY=()  # 短名 → Fusion 显示名
 typeset -A VM_STATE=()    # 短名 → 清单记录的状态（normal / paused …）
 typeset -A VM_LC=()       # 小写短名 → 短名，供大小写不敏感解析
+typeset -A VM_CONFLICT=() # 短名 → 1：同名但路径不同的多台 VM 无法区分，破坏性命令拒绝
 
 # ── 3. 扫描：仅 source 末尾与 `vm scan` 时调用 ──────────────────
 vm_scan() {
   emulate -L zsh
   local d f name invname id line key val chosen
   local -a hits
-  local -A cfg=() disp=() st=() seen=() filled=()
+  local -A cfg=() disp=() st=() seen=() src=()
 
-  VM_VMX=(); VM_DISPLAY=(); VM_STATE=(); VM_LC=()
+  VM_VMX=(); VM_DISPLAY=(); VM_STATE=(); VM_LC=(); VM_CONFLICT=()
 
   # 3a. 先扫默认目录：短名取磁盘上的真实目录名。
   #     清单里存的大小写未必和磁盘一致（本机 WinSer2019 就是），短名以磁盘为准，
@@ -63,11 +70,12 @@ vm_scan() {
     VM_DISPLAY[$name]="$name"
     VM_STATE[$name]=""
     seen[${name:l}]="$name"
+    src[$name]=disk
   done
 
-  # 3b. 再用 Fusion 清单补全：.vmx 路径以清单为准（macOS 卷大小写不敏感，两种写法
-  #     等价），显示名与状态也以清单为准；status 与 vmrun list 的比对统一转小写，
-  #     不受两边大小写差异影响。
+  # 3b. 再用 Fusion 清单补全。每条记录先统一验证路径，再做名称合并：
+  #     同一物理文件（清单与磁盘大小写/符号链接不同）→ 用清单路径刷新显示名与状态；
+  #     不同物理文件但短名相同 → 冲突，保留先出现的并记入 VM_CONFLICT（供破坏性命令拒绝）。
   #     按 id 排序遍历，保证「保留首个」的结果稳定可复现。
   local invpath
   if [[ -f "$VM_INVENTORY" ]]; then
@@ -87,33 +95,67 @@ vm_scan() {
     invpath="${cfg[$id]}"
     invname="${invpath:h:t}"; invname="${invname%.vmwarevm}"
     [[ -n "$invname" ]] || continue
+    # 统一先验证清单路径：绝对路径、.vmx 后缀、文件存在且可读。
+    # 失效条目（含 inventory-only 的陈旧路径）一律跳过并警告，不进管理列表。
+    if [[ "$invpath" != /* || "$invpath" != *.vmx || ! -f "$invpath" || ! -r "$invpath" ]]; then
+      print -P "%F{yellow}! 清单里 $invname 的路径失效，跳过: ${${invpath//\%/%%}}%f" >&2
+      continue
+    fi
     name="${seen[${invname:l}]}"
     if [[ -z "$name" ]]; then
       name="$invname"                            # 不在默认目录里，仅清单可见
+      VM_VMX[$name]="$invpath"
+      VM_DISPLAY[$name]="${disp[$id]:-$name}"
+      VM_STATE[$name]="${st[$id]}"
       seen[${name:l}]="$name"
-    elif [[ -n "${filled[$name]}" ]]; then
-      # 同名条目已处理过：路径相同算重复；路径不同是两台不同的 VM，
-      # 仅靠短名无法区分，保留首个并警告，不静默合并
-      if [[ "${VM_VMX[$name]:A}" == "${invpath:A}" ]]; then
-        print -P "%F{yellow}! 清单里 $name 有重复条目，保留首个%f" >&2
-      else
-        print -P "%F{yellow}! 短名冲突: $name 同时对应 ${VM_VMX[$name]} 和 ${invpath}，仅保留前者%f" >&2
-      fi
-      continue
-    elif [[ ! -f "$invpath" ]]; then
-      # 磁盘扫描已找到同名 VM，而清单路径已失效：保留磁盘结果
-      print -P "%F{yellow}! 清单里 $name 的路径失效，保留磁盘扫描的: ${VM_VMX[$name]}%f" >&2
+      src[$name]=inv
       continue
     fi
-    VM_VMX[$name]="$invpath"                     # 清单路径优先（大小写正确）
-    VM_DISPLAY[$name]="${disp[$id]:-$name}"
-    VM_STATE[$name]="${st[$id]}"
-    filled[$name]=1
+    # 同名已存在：按文件身份（设备+inode，跟随符号链接）判断是否同一台，
+    # 而不是比较路径字符串——同一文件在清单与磁盘上可能大小写/软链不同。
+    if _vm_same_file "${VM_VMX[$name]}" "$invpath"; then
+      if [[ "${src[$name]}" == inv ]]; then
+        print -P "%F{yellow}! 清单里 $name 有重复条目，保留首个%f" >&2
+        continue
+      fi
+      # 磁盘先发现、清单是同一台：用清单路径刷新（大小写正确），并带上清单的显示名/状态
+      VM_VMX[$name]="$invpath"
+      VM_DISPLAY[$name]="${disp[$id]:-$name}"
+      VM_STATE[$name]="${st[$id]}"
+      src[$name]=inv
+    else
+      # 同名但物理上是两台不同的 VM：仅靠短名无法区分 → 冲突
+      print -P "%F{yellow}! 短名冲突: $name 同时对应 ${${VM_VMX[$name]}//\%/%%} 和 ${${invpath}//\%/%%}，仅保留前者；该短名的破坏性命令将被拒绝%f" >&2
+      VM_CONFLICT[$name]=1
+    fi
   done
 
   for name in ${(k)VM_VMX}; do
     VM_LC[${name:l}]="$name"
   done
+}
+
+# 两个路径是否指向同一物理文件（比较设备号+inode，跟随符号链接）。
+# 判断依据必须是文件身份而非路径字符串：同一台 VM 的 .vmx 在
+# 清单与磁盘上可能因大小写、符号链接而呈现不同路径。
+_vm_same_file() {
+  emulate -L zsh
+  local a="$1" b="$2" ai bi
+  ai="$(/usr/bin/stat -L -f '%d:%i' "$a" 2>/dev/null)" || return 1
+  bi="$(/usr/bin/stat -L -f '%d:%i' "$b" 2>/dev/null)" || return 1
+  [[ -n "$ai" && "$ai" == "$bi" ]]
+}
+
+# 冲突短名的破坏性命令保护：同名但路径不同、无法确定用户指哪一台时，
+# kill/reset/down/snap delete/revert 这类不可逆操作直接拒绝。
+_vm_maybe_destroy() {
+  emulate -L zsh
+  local key="${VM_LC[${1:l}]:-$1}"
+  if (( $+VM_CONFLICT[$key] )); then
+    print -P "%F{red}✗ 短名 $key 对应不止一台虚拟机，无法确定操作对象，拒绝执行破坏性命令（vm vms 查看）%f" >&2
+    return 1
+  fi
+  return 0
 }
 
 # ── 4. 辅助 ────────────────────────────────────────────────────
@@ -182,7 +224,7 @@ _vm_parse_wait() {
   while (( $# )); do
     case "$1" in
       -w|--wait) _vm_waitflag=1 ;;
-      --)        rest+=("$@"); break ;;   # -- 之后是透传参数（如 ssh 选项），不再解析
+      --)        rest+=("$@"); break ;;   # -- 之后视为透传参数，不再解析
       *)         rest+=("$1") ;;
     esac
     shift
@@ -260,14 +302,9 @@ vm — VMware Fusion (headless) 管理
   vm unpause <name>    恢复（unpause）
   vm reset <name>      复位（reset soft，需 VMware Tools）
 
-网络 / 登录:
+网络 / IP:
   vm ip [-w] <name>             获取客户机 IP；-w = -wait 等待就绪（会阻塞）
-  vm ssh [-w] <name> [user] [-- ssh选项...] [远程命令...]
-                                拿 IP 后直接 ssh（默认用当前用户名）；
-                                -- 后的参数作为 ssh 选项放在目标地址之前，
-                                如: vm ssh kali root -- -p 2222
-                                不带 -- 时其余参数作为远程命令执行
-  ※ 两者都依赖 VMware Tools：不装 Tools 时立即失败；加 -w 则会一直阻塞等 Tools
+  ※ 依赖 VMware Tools：不装 Tools 时立即失败；加 -w 则会一直阻塞等 Tools
 
 快照:
   vm snap list <name>               列出快照（listSnapshots + .vmsd 备注）
@@ -277,8 +314,13 @@ vm — VMware Fusion (headless) 管理
 
 克隆:
   vm clone <src> <新名> [full|linked] [snapshot]
-                                克隆（linked 需源机有快照；指定 snapshot 时基于该
-                                快照克隆，缺省用 vmrun 默认行为；完成后自动纳入管理）
+                                克隆（linked 需源机有快照；snapshot 仅对 linked 生效，
+                                基于该快照克隆，缺省用 vmrun 默认行为；完成后自动纳入管理）
+
+删除:
+  vm delete <name> [--yes]     永久删除整台 VM（vmrun deleteVM，不可恢复）
+                                运行中或短名冲突时拒绝；交互式需输入短名确认，
+                                自动化脚本必须显式加 --yes
 
 帮助:
   vm help              显示本帮助
@@ -297,14 +339,17 @@ vm() {
     up)      local vmx; vmx=$(_vm_resolve "${1:-}") || return 1
              _vm_power start "$vmx" nogui ;;
     down)    local vmx; vmx=$(_vm_resolve "${1:-}") || return 1
+             _vm_maybe_destroy "$1" || return 1
              local rc
              _vm_power stop "$vmx" soft
              rc=$?
              (( rc != 0 )) && print -P "%F{yellow}! soft 关机失败：常见原因是未装/未启动 VMware Tools（vm status 可查）；确认无未保存数据后可改 vm kill $1 强制断电%f" >&2
              return $rc ;;
     kill)    local vmx; vmx=$(_vm_resolve "${1:-}") || return 1
+             _vm_maybe_destroy "$1" || return 1
              _vm_power stop "$vmx" hard ;;
     reset)   local vmx; vmx=$(_vm_resolve "${1:-}") || return 1
+             _vm_maybe_destroy "$1" || return 1
              local rc
              _vm_power reset "$vmx" soft
              rc=$?
@@ -329,37 +374,17 @@ vm() {
       print -rP -- "${ip//\%/%%}"     # stdout 只有 IP，可被 $( ) 捕获
       ;;
 
-    ssh)
-      _vm_parse_wait "$@"
-      set -- "${reply[@]}"
-      local vmx; vmx=$(_vm_resolve "${1:-}") || return 1
-      shift
-      local user="" ip
-      local -a pre=() post=()
-      if (( $# )) && [[ "$1" != "--" ]]; then
-        user="$1"; shift
-      fi
-      if (( $# )) && [[ "$1" == "--" ]]; then
-        shift
-        pre=("$@")     # -- 后全是 ssh 选项：OpenSSH 要求选项在 destination 之前
-      else
-        post=("$@")    # 不带 --：其余参数作为远程命令，放 destination 之后
-      fi
-      ip=$(_vm_ip "$vmx" "$_vm_waitflag")
-      if [[ -z "$ip" ]]; then
-        print -P "%F{yellow}✗ 未拿到 IP：VM 可能未开机或 VMware Tools 未就绪；可加 -w 等待%f" >&2
-        return 1
-      fi
-      local target="$ip"
-      [[ -n "$user" ]] && target="$user@$ip"
-      print -rP "%F{cyan}➤ ssh ${target//\%/%%}%f" >&2
-      ssh "${(@)pre}" "$target" "${(@)post}"
-      ;;
-
     status)
-      local name="${1:-}" vmx mark state n
+      local name="${1:-}" vmx mark state n rc out
       local -a running
-      running=(${${(f)"$(vmrun -T fusion list 2>/dev/null)"}:#Total running VMs:*})
+      out="$(vmrun -T fusion list 2>&1)"; rc=$?
+      if (( rc != 0 )); then
+        # 状态查询失败不能伪装成「全部未运行」：显式报错并透传退出码
+        print -P "%F{red}✗ 无法查询运行状态（vmrun list 失败，Fusion 未运行？）%f" >&2
+        [[ -n "$out" ]] && print -rP "  ${${out//\%/%%}}" >&2
+        return $rc
+      fi
+      running=(${${(f)out}:#Total running VMs:*})
       # vmrun 回显路径的大小写可能与清单不一致，统一转小写再精确比对
       # （转小写必须单独一步：与 :# 过滤链在同一层嵌套里会丢失过滤）
       running=("${(@)running:l}")
@@ -406,6 +431,9 @@ vm() {
           ;;
         create|delete|revert)
           local vmx; vmx=$(_vm_resolve "${1:-}") || return 1
+          case "$sub" in
+            delete|revert) _vm_maybe_destroy "$1" || return 1 ;;
+          esac
           local snap="${2:-}"
           if [[ -z "$snap" ]]; then
             print -P "%F{red}✗ 用法: vm snap $sub <name> <snap>%f" >&2
@@ -432,6 +460,11 @@ vm() {
       fi
       if [[ "$mode" != "full" && "$mode" != "linked" ]]; then
         print -P "%F{red}✗ 克隆类型必须是 full 或 linked，收到: $mode%f" >&2
+        return 1
+      fi
+      # full 克隆不支持指定 snapshot：与其静默忽略第 4 个参数，不如显式拒绝
+      if [[ "$mode" == "full" && -n "$snapname" ]]; then
+        print -P "%F{red}✗ full 克隆不支持指定 snapshot，请改用: vm clone $src $newname linked $snapname%f" >&2
         return 1
       fi
       # 新名必须是单个安全文件名：拒绝 / 、. 、.. 和控制字符，
@@ -483,6 +516,89 @@ vm() {
       local rc=$?
       if (( rc == 0 )); then
         print -P "%F{green}✓ 克隆完成，重新扫描以纳入管理…%f"
+        vm_scan
+        vm vms
+      else
+        # 目标目录在调用前已确认不存在，是本命令创建的；失败时清掉残留，
+        # 否则下次重试会被「目标已存在」挡住
+        print -P "%F{red}✗ 克隆失败，清理本次创建的目标目录%f" >&2
+        rm -rf -- "$dstdir"
+      fi
+      return $rc
+      ;;
+
+    delete)
+      # 永久删除：破坏性命令，多重防护（冲突/运行中/路径失效拒绝，交互确认）
+      local yesflag=0 name arg
+      for arg in "$@"; do
+        case "$arg" in
+          --yes|-y) yesflag=1 ;;
+          --*) print -P "%F{red}✗ 未知选项: $arg（删除支持 --yes）%f" >&2; return 1 ;;
+          *) if [[ -z "$name" ]]; then name="$arg"
+             else print -P "%F{red}✗ 多余参数: ${arg//\%/%%}，用法: vm delete <name> [--yes]%f" >&2; return 1
+             fi ;;
+        esac
+      done
+      [[ -n "$name" ]] || { print -P "%F{red}✗ 用法: vm delete <name> [--yes]%f" >&2; return 1; }
+      local key="${VM_LC[${name:l}]:-$name}"
+      local vmx; vmx=$(_vm_resolve "$name") || return 1
+      _vm_maybe_destroy "$name" || return 1       # 同名冲突的短名：拒绝，绝不二义删除
+      # 不信任扫描缓存：删除前此刻重新验证 .vmx 真实存在
+      if [[ ! -f "$vmx" ]]; then
+        print -P "%F{red}✗ $vmx 已不存在（扫描缓存过期），先 vm scan 刷新再试%f" >&2
+        return 1
+      fi
+      # 运行中的 VM 拒绝删除
+      local listout rc
+      listout="$(vmrun -T fusion list 2>&1)"; rc=$?
+      if (( rc != 0 )); then
+        print -P "%F{red}✗ 无法确认 VM 是否在运行（vmrun list 失败），拒绝删除%f" >&2
+        return $rc
+      fi
+      local -a running
+      running=(${${(f)listout}:#Total running VMs:*})
+      running=("${(@)running:l}")
+      if (( ${running[(Ie)${vmx:l}]} )); then
+        print -P "%F{red}✗ ${name//\%/%%} 正在运行，拒绝删除；先 vm down（软）或 vm kill（强制）%f" >&2
+        return 1
+      fi
+      # 位于默认目录之外（inventory-only / 外部路径）→ 需要额外确认
+      local realdir="${${VM_DIR%/}:A}" realvmx="${vmx:A}" external=0
+      if [[ "$realvmx" != "$realdir"/* ]]; then external=1; fi
+      local dname="${VM_DISPLAY[$key]:-$name}"
+      print -P "%F{red}⚠ 即将永久删除（vmrun deleteVM，不可恢复）:%f" >&2
+      print -P "  %F{cyan}${name//\%/%%}%f（${${dname//\%/%%}}）" >&2
+      print -P "  ${vmx//\%/%%}" >&2
+      (( external )) && print -P "%F{yellow}  ⚠ 该 VM 不在 ${${VM_DIR//\%/%%}} 内（清单/inventory-only 路径）%f" >&2
+      if (( ! yesflag )); then
+        # 非交互环境必须显式 --yes，不能默认跳过确认
+        if [[ ! -t 0 ]]; then
+          print -P "%F{yellow}✗ 非交互环境请显式加 --yes 确认删除%f" >&2
+          return 1
+        fi
+        local typed
+        print -rn "  输入短名 ${name} 以确认删除: " >&2
+        read -r typed
+        typed="${typed%$'\r'}"      # 某些终端/伪终端会带回车符
+        if [[ "${typed:l}" != "${name:l}" ]]; then
+          print -P "%F{yellow}输入不匹配，已取消%f" >&2
+          return 1
+        fi
+        if (( external )); then
+          print -rn "  该 VM 在 $VM_DIR 之外，再输入 yes 确认: " >&2
+          read -r typed
+          typed="${typed%$'\r'}"
+          if [[ "${typed:l}" != "yes" ]]; then
+            print -P "%F{yellow}未确认，已取消%f" >&2
+            return 1
+          fi
+        fi
+      fi
+      _vm_echo deleteVM "$vmx"
+      vmrun -T fusion deleteVM "$vmx"
+      rc=$?
+      if (( rc == 0 )); then
+        print -P "%F{green}✓ 已删除 ${name//\%/%%}，重新扫描…%f"
         vm_scan
         vm vms
       fi
@@ -540,9 +656,9 @@ _vm_comp() {
         'reset:复位 (soft)'
         'status:查看状态'
         'ip:获取客户机 IP'
-        'ssh:SSH 登录客户机'
         'snap:快照管理'
         'clone:克隆虚拟机'
+        'delete:永久删除（需确认）'
         'list:列出运行中的 VM'
         'vms:列出已发现的 VM'
         'scan:重新扫描'
@@ -573,23 +689,25 @@ _vm_comp() {
             2) _wanted vms expl '源虚拟机' compadd -a vms ;;
             4) _values '克隆类型' 'full[完整克隆]' 'linked[链接克隆]' ;;
             5)
-              # linked 克隆可指定基于哪个快照
+              # linked 克隆可指定基于哪个快照；full 不支持
               local vmx snames=()
-              vmx="${VM_VMX[${VM_LC[${words[2]:l}]}]}"
-              if [[ -n "$vmx" ]]; then
-                snames=("${(@f)$(_vm_snap_names "${vmx:r}.vmsd")}")
+              if [[ "${words[4]}" == linked ]]; then
+                vmx="${VM_VMX[${VM_LC[${words[2]:l}]}]}"
+                if [[ -n "$vmx" ]]; then
+                  snames=("${(@f)$(_vm_snap_names "${vmx:r}.vmsd")}")
+                fi
+                (( ${#snames} )) && _wanted snaps expl '快照名' compadd -a snames
               fi
-              (( ${#snames} )) && _wanted snaps expl '快照名' compadd -a snames
               ;;
           esac
           ;;
-        ip|ssh)
+        ip)
           case $CURRENT in
             2) _alternative 'vms:虚拟机:compadd -a vms' 'opts:选项:compadd -- -w --wait' ;;
             3) [[ ${words[2]} == -* ]] && _wanted vms expl '虚拟机' compadd -a vms ;;
           esac
           ;;
-        up|down|kill|suspend|pause|unpause|reset|status)
+        up|down|kill|suspend|pause|unpause|reset|status|delete)
           _wanted vms expl '虚拟机' compadd -a vms
           ;;
       esac

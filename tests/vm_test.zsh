@@ -1,7 +1,6 @@
 #!/bin/zsh
-# vm.zsh 沙盒回归测试：用假 vmrun/ssh 隔离，不会碰真实虚拟机。
-# 假 vmrun/ssh 逐参数记录 argv（contract test），而非只拼 $*：
-# 这样才能断言 ssh 选项位于 destination 之前、clone 的目标路径正确等真实语义。
+# vm.zsh 沙盒回归测试：用假 vmrun 隔离，不会碰真实虚拟机。
+# 假 vmrun 每次调用把参数记进 calls.log 供契约断言（clone 目标路径、-cloneName 等）。
 # 注：夹具里清单与磁盘的 .vmx 路径大小写保持一致——测试卷可能是大小写敏感的，
 #     「清单大小写与磁盘不一致」的合并逻辑依赖大小写不敏感卷上的 -f 判定，
 #     在敏感卷上会正确地走「路径失效保留磁盘结果」分支，无法在此仿真。
@@ -48,6 +47,7 @@ print -r -- "vmrun \$*" >> "$T/calls.log"
 sub="\$3"
 case "\$sub" in
   list)
+    if [[ -n "\$FAKE_LIST_FAIL" ]]; then echo "Error: unable to connect to the VMware server"; exit 1; fi
     echo "Total running VMs: 1"
     echo "$T/vms/Kali Linux.vmwarevm/Kali Linux.vmx" ;;
   checkToolsState) echo "installed" ;;
@@ -62,23 +62,16 @@ case "\$sub" in
   stop)
     if [[ -n "\$FAKE_STOP_FAIL" ]]; then echo "Error: VMware Tools are not running in this VM"; exit 1; fi
     echo "fake vmrun: stop" ;;
-  clone) : > "\$5"; echo "fake vmrun: clone" ;;
+  deleteVM) rm -f "\$4"; echo "fake vmrun: deleteVM" ;;
+  clone)
+    if [[ -n "\$FAKE_CLONE_FAIL" ]]; then echo "Error: clone failed"; exit 1; fi
+    : > "\$5"; echo "fake vmrun: clone" ;;
   *) echo "fake vmrun: \$sub" ;;
 esac
 FAKE
   chmod +x "$T/vmrun"
 }
 write_vmrun
-
-# 假 ssh：逐参数回显 argv（argc=N |arg1 |arg2 ...），验证顺序而非仅拼接
-cat > "$T/ssh" <<'FAKE'
-#!/bin/zsh
-print -rn -- "argc=$#"
-local a
-for a in "$@"; do print -rn -- " |$a"; done
-print
-FAKE
-chmod +x "$T/ssh"
 
 export PATH="$T:$PATH" VM_DIR="$T/vms" VM_INVENTORY="$T/inventory"
 source "$VM_ZSH"
@@ -128,8 +121,8 @@ chk "显示名不被列宽截断" "Kali Linux 2024 "
 out="$(vm status 'KALI LINUX' 2>/dev/null)"
 chk "stdout 不含 trace" ".vmx:"
 
-# ── ip / ssh ─────────────────────────────────────────────────────
-print -P "%F{cyan}== ip / ssh ==%f"
+# ── ip ─────────────────────────────────────────────────────────
+print -P "%F{cyan}== ip ==%f"
 FAKE_IP=""
 out="$(vm ip 'kali linux' 2>&1)"
 chk "未拿到 IP 提示" "未拿到 IP"
@@ -150,20 +143,6 @@ eq "后置 -w 正常" "192.168.11.22" "$out"
 grep -q "getGuestIPAddress .* -wait" "$T/calls.log"
 ok "-w 透传为 vmrun -wait"
 
-out="$(vm ssh 'kali linux' root -- -p 2222 2>/dev/null)"
-eq "ssh 选项位于 destination 之前" "argc=3 |-p |2222 |root@192.168.11.22" "$out"
-out="$(vm ssh 'kali linux' -- -4 2>/dev/null)"
-eq "无用户名时选项同样前置" "argc=2 |-4 |192.168.11.22" "$out"
-out="$(vm ssh 'kali linux' 2>/dev/null)"
-eq "默认用当前用户（不拼 user@）" "argc=1 |192.168.11.22" "$out"
-out="$(vm ssh 'kali linux' root ls /tmp 2>/dev/null)"
-eq "不带 -- 时参数作为远程命令在 destination 之后" \
-  "argc=3 |root@192.168.11.22 |ls |/tmp" "$out"
-out="$(vm ssh -w 'kali linux' -- -w 2>/dev/null)"
-eq "-- 后的 -w 原样透传，不被解析为等待标志" "argc=2 |-w |192.168.11.22" "$out"
-grep -q "getGuestIPAddress .* -wait" "$T/calls.log"
-ok "前置 -w 仍生效为等待标志"
-
 # ── % 转义与错误路径 ─────────────────────────────────────────────
 print -P "%F{cyan}== % 转义与错误路径 ==%f"
 out="$(vm up 50%off 2>&1)"
@@ -174,6 +153,9 @@ chk "可用列表中 % 名字原样显示" "50%off"
 eq "未知 VM rc=1" "1" "$rc"
 out="$(vm bogus 2>&1)"; rc=$?
 eq "未知子命令 rc=1" "1" "$rc"
+out="$(vm ssh 'kali linux' root ls /tmp 2>&1)"; rc=$?
+chk "ssh 子命令已移除，报未知子命令" "未知子命令"
+eq "ssh 移除后 rc=1" "1" "$rc"
 out="$(vm up 2>&1)"; rc=$?
 chk "缺参数给用法提示" "缺少虚拟机名"
 eq "缺参数 rc=1" "1" "$rc"
@@ -280,6 +262,102 @@ ok "linked clone argv 契约（-snapshot=base）"
 out="$(vm clone 'kali linux' linkedvm2 linked nosuch 2>&1)"; rc=$?
 chk "linked 指定不存在的快照时拒绝" "没有名为 nosuch 的快照"
 eq "不存在快照 rc=1" "1" "$rc"
+
+# ── 回归：失败显式化 + 同名冲突保护 ─────────────────────────────
+print -P "%F{cyan}== 失败显式化与同名冲突保护 ==%f"
+
+# 1. vmrun list 失败：status 必须报错，不能把全部 VM 标成「未运行」
+FAKE_LIST_FAIL=1
+export FAKE_LIST_FAIL
+out="$(vm status 'kali linux' 2>&1)"; rc=$?
+unset FAKE_LIST_FAIL
+eq "vmrun list 失败时 status rc=1" "1" "$rc"
+chk "显示查询失败而非未运行" "无法查询运行状态"
+
+# 2. inventory-only 的失效路径不得进入管理列表
+#    （注意：vm_scan 会改 VM_VMX/VM_CONFLICT 等全局数组，必须在主 shell 里跑——
+#     包在 $() 里只改子 shell 副本，后续断言读不到。这里先跑 scan 再断言）
+cat > "$T/inventory" <<INV
+.encoding = "UTF-8"
+vmlist1.config = "$T/ghost/Phantom.vmwarevm/Phantom.vmx"
+vmlist1.DisplayName = "Phantom"
+vmlist1.State = "normal"
+INV
+vm scan >"$T/scan.out" 2>"$T/scan.err"
+out="$(<$T/scan.err)"
+chk "inventory-only 失效路径也有警告" "路径失效"
+out="$(vm vms 2>&1)"
+[[ "$out" != *Phantom* ]]
+ok "失效清单条目不进入管理列表"
+
+# 3. 磁盘扫描与清单「首条」同名但不同物理文件：冲突警告 + 保留磁盘路径
+#    （原 bug：磁盘结果被清单首条静默覆盖，破坏性命令可能操作错 VM）
+mkdir -p "$T/vms/Debian.vmwarevm"
+touch "$T/vms/Debian.vmwarevm/Debian.vmx"
+cat > "$T/inventory" <<INV
+.encoding = "UTF-8"
+vmlist1.config = "$T/other2/Debian.vmwarevm/Debian.vmx"
+vmlist1.DisplayName = "Debian mirror"
+vmlist1.State = "normal"
+INV
+vm scan >"$T/scan.out" 2>"$T/scan.err"
+out="$(<$T/scan.err)"
+chk "磁盘 vs 清单首条同名触发冲突警告" "短名冲突"
+out="$(vm vms 2>&1)"
+chk "保留磁盘扫描的路径，不再静默覆盖" "$T/vms/Debian.vmwarevm/Debian.vmx"
+out="$(vm kill Debian 2>&1)"; rc=$?
+eq "冲突短名拒绝 kill" "1" "$rc"
+chk "kill 拒绝有提示" "拒绝执行"
+out="$(vm snap delete Debian base 2>&1)"; rc=$?
+eq "冲突短名拒绝 snap delete" "1" "$rc"
+before=$(wc -l < "$T/calls.log")
+vm kill Debian >/dev/null 2>&1
+after=$(wc -l < "$T/calls.log")
+eq "冲突拒绝时不调用 vmrun" "$before" "$after"
+
+# 4. clone：full+snapshot 显式拒绝；失败清理本次创建的目录、可立即重试
+out="$(vm clone 'kali linux' fullsnap full base 2>&1)"; rc=$?
+eq "full 克隆指定 snapshot 被拒绝" "1" "$rc"
+chk "full+snapshot 拒绝提示" "不支持指定 snapshot"
+FAKE_CLONE_FAIL=1
+export FAKE_CLONE_FAIL
+out="$(vm clone 'kali linux' retryvm full 2>&1)"; rc=$?
+unset FAKE_CLONE_FAIL
+eq "clone 失败 rc=1" "1" "$rc"
+[[ ! -e "$T/vms/retryvm.vmwarevm" ]]
+ok "clone 失败后清理目标目录"
+out="$(vm clone 'kali linux' retryvm full 2>&1)"
+chk "清理后可立即重试成功" "克隆完成"
+
+# 5. vm delete：运行中/冲突/路径失效/非交互无 --yes 均拒绝；--yes 删除成功并重扫消失
+print -P "%F{cyan}== vm delete 防护 ==%f"
+# 5.1 运行中的 VM（fake vmrun list 恒报 Kali 在运行）
+out="$(vm delete 'kali linux' --yes 2>&1)"; rc=$?
+eq "运行中 VM 拒绝删除" "1" "$rc"
+chk "提示正在运行" "正在运行"
+# 5.2 冲突短名拒绝（磁盘 Debian vs 清单 other2 Debian）
+out="$(vm delete Debian --yes 2>&1)"; rc=$?
+eq "冲突短名拒绝 delete" "1" "$rc"
+chk "提示拒绝执行" "拒绝执行"
+# 5.3 扫描缓存里的路径已失效（人为塞一个 ghost 条目）
+VM_VMX[ghost]="$T/ghost/Gone.vmwarevm/Gone.vmx"
+VM_LC[ghost]=ghost
+VM_DISPLAY[ghost]="Ghost"
+out="$(vm delete ghost --yes 2>&1)"; rc=$?
+eq "路径失效 VM 拒绝删除" "1" "$rc"
+chk "提示路径已不存在" "已不存在"
+# 5.4 非交互且未加 --yes：拒绝（stdin 指向 /dev/null，不触发交互读取）
+out="$(vm delete 50%off </dev/null 2>&1)"; rc=$?
+eq "非交互无 --yes 拒绝删除" "1" "$rc"
+chk "提示加 --yes" "--yes"
+# 5.5 --yes 成功删除（fake deleteVM 删掉 .vmx），重扫后 VM 消失
+out="$(vm delete 50%off --yes 2>&1)"; rc=$?
+eq "正常 VM --yes 删除 rc=0" "0" "$rc"
+chk "删除成功提示" "已删除 50%off"
+vm scan >/dev/null 2>&1
+out="$(vm vms 2>&1)"
+[[ "$out" != *50%off* ]]
+ok "删除后重新扫描，VM 已不在列表"
 
 # ── 补全注册时序 ─────────────────────────────────────────────────
 print -P "%F{cyan}== 补全注册时序 ==%f"
