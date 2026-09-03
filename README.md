@@ -27,12 +27,18 @@ VMware Fusion 的 headless 命令行管理工具（zsh 函数），基于 `vmrun
 ## 安装
 
 ```zsh
-git clone <本仓库> ~/.config/vm   # 或把 vm.zsh 放到任意位置
+git clone https://github.com/hack2xia/vm.git ~/.config/vm   # 或把 vm.zsh 放到任意位置
 # .zshrc 里加一行：
 [ -f ~/.config/vm/vm.zsh ] && source ~/.config/vm/vm.zsh
 ```
 
 依赖 `/Applications/VMware Fusion.app`（脚本自管 PATH，把其 `Contents/Public` 追加进来）。`ip`/`down` 等依赖客户机 VMware Tools。
+
+- **环境要求**：macOS、zsh 5.x+、VMware Fusion（含 `vmrun`）。脚本不做重依赖，其余命令均为 macOS 自带工具。
+- **安装后验证**：新开一个 zsh 终端执行 `vm vms`，能看到已发现的虚拟机即成功；看不到先 `vm scan`。
+- **更新**：`git -C ~/.config/vm pull` 后重开终端（或重新 `source ~/.config/vm/vm.zsh`）。
+- **卸载**：删除 `.zshrc` 里的 source 行，再 `rm -rf ~/.config/vm`。脚本不写任何外部状态，删目录即完全移除。
+- 版本记录见 [CHANGELOG.md](CHANGELOG.md)。
 
 ## 命令一览
 
@@ -67,6 +73,9 @@ zsh 补全（子命令 / VM 短名 / 快照名）对两种加载顺序都能注�
 |---|---|---|
 | `VM_DIR` | `~/Virtual Machines.localized` | 兜底扫描目录 |
 | `VM_INVENTORY` | `~/Library/Application Support/VMware Fusion/vmInventory` | Fusion 清单 |
+| `NO_COLOR` | 未设置 | 设置后（任意非空值）强制关闭彩色输出 |
+
+颜色输出按实际 stdout 判定：管道 / 重定向 / 命令替换中自动关闭，无需显式设置。
 
 ## 测试
 
@@ -74,4 +83,8 @@ zsh 补全（子命令 / VM 短名 / 快照名）对两种加载顺序都能注�
 zsh tests/vm_test.zsh
 ```
 
-沙盒回归测试：用假 `vmrun` 隔离，并逐参数记录 argv 做契约断言（覆盖 clone 目标路径、路径穿越、短名冲突与破坏性拒绝、失效清单、错误码透传、删除防护等），不会碰真实虚拟机。
+沙盒回归测试：用假 `vmrun` 隔离，并逐参数记录 argv 做契约断言（覆盖 clone 目标路径、路径穿越、短名冲突与破坏性拒绝、失效清单、错误码透传、删除防护、多余参数、非终端无色等），不会碰真实虚拟机。
+
+## 许可
+
+MIT，见 [LICENSE](LICENSE)。

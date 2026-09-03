@@ -30,6 +30,10 @@ fi
 # ── 2. 路径与状态 ───────────────────────────────────────────────
 VM_DIR="${VM_DIR:-$HOME/Virtual Machines.localized}"
 VM_INVENTORY="${VM_INVENTORY:-$HOME/Library/Application Support/VMware Fusion/vmInventory}"
+
+# 颜色策略（在 _vm_p() 里按每次调用的实际 stdout 判定，而非 source 时定死）：
+# 设了 NO_COLOR，或 stdout 不是终端（管道/重定向/命令替换）时剥离 %F{…}/%f。
+
 typeset -A VM_VMX=()      # 短名 → .vmx 绝对路径（真实大小写）
 typeset -A VM_DISPLAY=()  # 短名 → Fusion 显示名
 typeset -A VM_STATE=()    # 短名 → 清单记录的状态（normal / paused …）
@@ -59,11 +63,11 @@ vm_scan() {
     done
     if [[ -z "$chosen" ]]; then
       (( ${#hits} > 1 )) && \
-        print -P "%F{yellow}! $name 下有多个 .vmx，取 ${hits[1]:t}%f" >&2
+        _vm_p -P "%F{yellow}! $name 下有多个 .vmx，取 ${hits[1]:t}%f" >&2
       chosen="${hits[1]}"
     fi
     if [[ -n "${seen[${name:l}]}" ]]; then
-      print -P "%F{yellow}! 短名重复（忽略大小写）: $name，已跳过%f" >&2
+      _vm_p -P "%F{yellow}! 短名重复（忽略大小写）: $name，已跳过%f" >&2
       continue
     fi
     VM_VMX[$name]="$chosen"
@@ -98,7 +102,7 @@ vm_scan() {
     # 统一先验证清单路径：绝对路径、.vmx 后缀、文件存在且可读。
     # 失效条目（含 inventory-only 的陈旧路径）一律跳过并警告，不进管理列表。
     if [[ "$invpath" != /* || "$invpath" != *.vmx || ! -f "$invpath" || ! -r "$invpath" ]]; then
-      print -P "%F{yellow}! 清单里 $invname 的路径失效，跳过: ${${invpath//\%/%%}}%f" >&2
+      _vm_p -P "%F{yellow}! 清单里 $invname 的路径失效，跳过: ${${invpath//\%/%%}}%f" >&2
       continue
     fi
     name="${seen[${invname:l}]}"
@@ -115,7 +119,7 @@ vm_scan() {
     # 而不是比较路径字符串——同一文件在清单与磁盘上可能大小写/软链不同。
     if _vm_same_file "${VM_VMX[$name]}" "$invpath"; then
       if [[ "${src[$name]}" == inv ]]; then
-        print -P "%F{yellow}! 清单里 $name 有重复条目，保留首个%f" >&2
+        _vm_p -P "%F{yellow}! 清单里 $name 有重复条目，保留首个%f" >&2
         continue
       fi
       # 磁盘先发现、清单是同一台：用清单路径刷新（大小写正确），并带上清单的显示名/状态
@@ -125,7 +129,7 @@ vm_scan() {
       src[$name]=inv
     else
       # 同名但物理上是两台不同的 VM：仅靠短名无法区分 → 冲突
-      print -P "%F{yellow}! 短名冲突: $name 同时对应 ${${VM_VMX[$name]}//\%/%%} 和 ${${invpath}//\%/%%}，仅保留前者；该短名的破坏性命令将被拒绝%f" >&2
+      _vm_p -P "%F{yellow}! 短名冲突: $name 同时对应 ${${VM_VMX[$name]}//\%/%%} 和 ${${invpath}//\%/%%}，仅保留前者；该短名的破坏性命令将被拒绝%f" >&2
       VM_CONFLICT[$name]=1
     fi
   done
@@ -152,33 +156,62 @@ _vm_maybe_destroy() {
   emulate -L zsh
   local key="${VM_LC[${1:l}]:-$1}"
   if (( $+VM_CONFLICT[$key] )); then
-    print -P "%F{red}✗ 短名 $key 对应不止一台虚拟机，无法确定操作对象，拒绝执行破坏性命令（vm vms 查看）%f" >&2
+    _vm_p -P "%F{red}✗ 短名 $key 对应不止一台虚拟机，无法确定操作对象，拒绝执行破坏性命令（vm vms 查看）%f" >&2
     return 1
   fi
   return 0
 }
 
+# 参数个数校验：$1=实际参数个数，$2=允许的最大个数，$3=用法示例。
+# 拼写错误/多余参数不再被静默忽略，而是报错退出。
+_vm_need() {
+  emulate -L zsh
+  if (( $1 > $2 )); then
+    _vm_p -P "%F{red}✗ 参数过多。用法: vm $3%f" >&2
+    return 1
+  fi
+  return 0
+}
+
+# 统一输出入口：等价 print -P，但颜色关闭时剥掉 %F{…}/%f 转义。
+# 所有需要 prompt 展开/颜色的输出都应改走 _vm_p，便于 NO_COLOR/非终端干净输出。
+_vm_p() {
+  emulate -L zsh
+  # 本次调用按实际 stdout 判断是否上色（管道/重定向/命令替换一律无色）
+  if [[ -z "${NO_COLOR:-}" && -t 1 ]]; then
+    builtin print "$@"
+    return
+  fi
+  local -a args=("$@")
+  local n="$#"
+  local f="${args[$n]}"
+  # 颜色关闭：用 sed 剥掉 %F{…}/%f 后仍走 print -P（保留 %% 等转义语义）
+  f="$(builtin print -rn -- "$f" | LC_ALL=C sed -E 's/%F\{[^}]*\}//g; s/%f//g')"
+  args[$n]="$f"
+  builtin print "${(@)args}"
+}
+
 # ── 4. 辅助 ────────────────────────────────────────────────────
 # 动态内容先转义 `%` 再展开，避免路径里的 %x 被 print -P 当作 prompt 序列吃掉。
 # 走 stderr：它是 trace 而不是结果，这样 `ip=$(vm ip kali)` 才能只拿到 IP。
-_vm_echo() { print -rP "%F{cyan}➤ vmrun -T fusion ${${*//\%/%%}}%f" >&2; }
+_vm_echo() { _vm_p -rP "%F{cyan}➤ vmrun -T fusion ${${*//\%/%%}}%f" >&2; }
 
 _vm_resolve() {
   emulate -L zsh
   # $1 = 短名；命中则向 stdout 输出 .vmx 路径并返回 0，否则报错返回 1
   local name="$1" vmx
   if [[ -z "$name" ]]; then
-    print -P "%F{red}✗ 缺少虚拟机名，用法: vm <命令> <name>%f" >&2
+    _vm_p -P "%F{red}✗ 缺少虚拟机名，用法: vm <命令> <name>%f" >&2
     return 1
   fi
   vmx="${VM_VMX[$name]}"
   [[ -z "$vmx" ]] && vmx="${VM_VMX[${VM_LC[$name:l]}]}"   # 大小写不敏感兜底
   if [[ -z "$vmx" ]]; then
-    print -P "%F{red}✗ 未知虚拟机: $name%f" >&2
+    _vm_p -P "%F{red}✗ 未知虚拟机: $name%f" >&2
     if (( ${#VM_VMX} )); then
-      print -P "%F{yellow}  可用: ${${(k)VM_VMX}//\%/%%}%f" >&2
+      _vm_p -P "%F{yellow}  可用: ${${(k)VM_VMX}//\%/%%}%f" >&2
     else
-      print -P "%F{yellow}  当前未发现任何虚拟机，先执行: vm scan%f" >&2
+      _vm_p -P "%F{yellow}  当前未发现任何虚拟机，先执行: vm scan%f" >&2
     fi
     return 1
   fi
@@ -210,7 +243,7 @@ _vm_ip() {
     done
   fi
   if [[ -z "$ip" ]]; then
-    [[ -n "$out" ]] && print -rP "%F{red}${${out//\%/%%}}%f" >&2
+    [[ -n "$out" ]] && _vm_p -rP "%F{red}${${out//\%/%%}}%f" >&2
     return 1
   fi
   print -rn -- "$ip"
@@ -237,19 +270,19 @@ _vm_snap_notes() {
   emulate -L zsh
   local vmsd="$1" i sname sdesc
   local -a idxs
-  [[ -f "$vmsd" ]] || { print -P "%F{yellow}（未找到 .vmsd，无法读取备注）%f"; return 0; }
+  [[ -f "$vmsd" ]] || { _vm_p -P "%F{yellow}（未找到 .vmsd，无法读取备注）%f"; return 0; }
 
   # 快照编号在删过中间快照后可能不连续，所以直接枚举实际存在的编号
   idxs=(${${(f)"$(grep -oE '^snapshot[0-9]+\.displayName' "$vmsd")"}//[!0-9]/})
-  (( ${#idxs} )) || { print -P "%F{yellow}（.vmsd 中无快照备注）%f"; return 0; }
+  (( ${#idxs} )) || { _vm_p -P "%F{yellow}（.vmsd 中无快照备注）%f"; return 0; }
 
-  print -P "%F{green}— 快照备注（.vmsd）—%f"
+  _vm_p -P "%F{green}— 快照备注（.vmsd）—%f"
   for i in ${(n)idxs}; do
     sname=$(grep -E "^snapshot${i}\.displayName" "$vmsd" \
             | sed -E 's/^[^=]*= *"//; s/[[:space:]]*"[[:space:]]*$//')
     sdesc=$(grep -E "^snapshot${i}\.description" "$vmsd" \
             | sed -E 's/^[^=]*= *"//; s/[[:space:]]*"[[:space:]]*$//')
-    print -rP "  %F{cyan}${${sname:-<未命名>}//\%/%%}%f  %F{yellow}备注:%f ${${sdesc:-<无>}//\%/%%}"
+    _vm_p -rP "  %F{cyan}${${sname:-<未命名>}//\%/%%}%f  %F{yellow}备注:%f ${${sdesc:-<无>}//\%/%%}"
   done
 }
 
@@ -279,7 +312,7 @@ _vm_status_line() {
   b="${(r:dw:)${${VM_DISPLAY[$n]}//\%/%%}}"
   c="${(r:8:)${VM_STATE[$n]:-未知}}"
   d="${(r:13:)${t:-unknown}}"
-  print -rP -- "  $m %F{cyan}${a}%f ${b} ${c} ${d} $s"
+  _vm_p -rP -- "  $m %F{cyan}${a}%f ${b} ${c} ${d} $s"
 }
 
 # ── 5. 帮助 ────────────────────────────────────────────────────
@@ -333,55 +366,69 @@ vm() {
   local cmd="${1:-}" reply _vm_waitflag
   shift 2>/dev/null
 
-  [[ -z "$cmd" || "$cmd" == "help" ]] && { vm_help; return 0; }
+  [[ -z "$cmd" ]] && { vm_help; return 0; }
+  if [[ "$cmd" == "help" ]]; then
+    _vm_need $# 0 'help' || return 1
+    vm_help
+    return 0
+  fi
 
   case "$cmd" in
-    up)      local vmx; vmx=$(_vm_resolve "${1:-}") || return 1
+    up)      _vm_need $# 1 'up <name>' || return 1
+             local vmx; vmx=$(_vm_resolve "${1:-}") || return 1
              _vm_power start "$vmx" nogui ;;
-    down)    local vmx; vmx=$(_vm_resolve "${1:-}") || return 1
+    down)    _vm_need $# 1 'down <name>' || return 1
+             local vmx; vmx=$(_vm_resolve "${1:-}") || return 1
              _vm_maybe_destroy "$1" || return 1
              local rc
              _vm_power stop "$vmx" soft
              rc=$?
-             (( rc != 0 )) && print -P "%F{yellow}! soft 关机失败：常见原因是未装/未启动 VMware Tools（vm status 可查）；确认无未保存数据后可改 vm kill $1 强制断电%f" >&2
+             (( rc != 0 )) && _vm_p -P "%F{yellow}! soft 关机失败：常见原因是未装/未启动 VMware Tools（vm status 可查）；确认无未保存数据后可改 vm kill $1 强制断电%f" >&2
              return $rc ;;
-    kill)    local vmx; vmx=$(_vm_resolve "${1:-}") || return 1
+    kill)    _vm_need $# 1 'kill <name>' || return 1
+             local vmx; vmx=$(_vm_resolve "${1:-}") || return 1
              _vm_maybe_destroy "$1" || return 1
              _vm_power stop "$vmx" hard ;;
-    reset)   local vmx; vmx=$(_vm_resolve "${1:-}") || return 1
+    reset)   _vm_need $# 1 'reset <name>' || return 1
+             local vmx; vmx=$(_vm_resolve "${1:-}") || return 1
              _vm_maybe_destroy "$1" || return 1
              local rc
              _vm_power reset "$vmx" soft
              rc=$?
-             (( rc != 0 )) && print -P "%F{yellow}! soft 复位失败：常见原因是未装/未启动 VMware Tools（vm status 可查）%f" >&2
+             (( rc != 0 )) && _vm_p -P "%F{yellow}! soft 复位失败：常见原因是未装/未启动 VMware Tools（vm status 可查）%f" >&2
              return $rc ;;
-    suspend) local vmx; vmx=$(_vm_resolve "${1:-}") || return 1
+    suspend) _vm_need $# 1 'suspend <name>' || return 1
+             local vmx; vmx=$(_vm_resolve "${1:-}") || return 1
              _vm_power suspend "$vmx" ;;
-    pause)   local vmx; vmx=$(_vm_resolve "${1:-}") || return 1
+    pause)   _vm_need $# 1 'pause <name>' || return 1
+             local vmx; vmx=$(_vm_resolve "${1:-}") || return 1
              _vm_power pause "$vmx" ;;
-    unpause) local vmx; vmx=$(_vm_resolve "${1:-}") || return 1
+    unpause) _vm_need $# 1 'unpause <name>' || return 1
+             local vmx; vmx=$(_vm_resolve "${1:-}") || return 1
              _vm_power unpause "$vmx" ;;
 
     ip)
       _vm_parse_wait "$@"
       set -- "${reply[@]}"
+      _vm_need $# 1 'ip [-w] <name>' || return 1
       local vmx; vmx=$(_vm_resolve "$1") || return 1
       local ip; ip=$(_vm_ip "$vmx" "$_vm_waitflag")
       if [[ -z "$ip" ]]; then
-        print -P "%F{yellow}✗ 未拿到 IP：VM 可能未开机或 VMware Tools 未就绪；可加 -w 等待%f" >&2
+        _vm_p -P "%F{yellow}✗ 未拿到 IP：VM 可能未开机或 VMware Tools 未就绪；可加 -w 等待%f" >&2
         return 1
       fi
-      print -rP -- "${ip//\%/%%}"     # stdout 只有 IP，可被 $( ) 捕获
+      _vm_p -rP -- "${ip//\%/%%}"     # stdout 只有 IP，可被 $( ) 捕获
       ;;
 
     status)
+      _vm_need $# 1 'status [name]' || return 1
       local name="${1:-}" vmx mark state n rc out
       local -a running
       out="$(vmrun -T fusion list 2>&1)"; rc=$?
       if (( rc != 0 )); then
         # 状态查询失败不能伪装成「全部未运行」：显式报错并透传退出码
-        print -P "%F{red}✗ 无法查询运行状态（vmrun list 失败，Fusion 未运行？）%f" >&2
-        [[ -n "$out" ]] && print -rP "  ${${out//\%/%%}}" >&2
+        _vm_p -P "%F{red}✗ 无法查询运行状态（vmrun list 失败，Fusion 未运行？）%f" >&2
+        [[ -n "$out" ]] && _vm_p -rP "  ${${out//\%/%%}}" >&2
         return $rc
       fi
       running=(${${(f)out}:#Total running VMs:*})
@@ -397,16 +444,16 @@ vm() {
           mark="%F{white}○%f"; state="未运行"
         fi
         _vm_status_line "$name" "$mark" "$state" "$(_vm_tools "$vmx")" "${#name}" "${#VM_DISPLAY[$name]}"
-        print -rP "      .vmx: ${${VM_VMX[$name]}//\%/%%}"
+        _vm_p -rP "      .vmx: ${${VM_VMX[$name]}//\%/%%}"
       else
-        (( ${#VM_VMX} )) || { print -P "%F{yellow}未发现任何虚拟机，执行: vm scan%f"; return 0; }
+        (( ${#VM_VMX} )) || { _vm_p -P "%F{yellow}未发现任何虚拟机，执行: vm scan%f"; return 0; }
         # 列宽取最长名称，避免长名字被 (r:14:) 截断
         local -i nw=8 dw=8
         for n in ${(k)VM_VMX}; do
           (( ${#n} > nw )) && nw=${#n}
           (( ${#VM_DISPLAY[$n]} > dw )) && dw=${#VM_DISPLAY[$n]}
         done
-        print -P "%F{green}共 ${#VM_VMX} 台虚拟机：%f"
+        _vm_p -P "%F{green}共 ${#VM_VMX} 台虚拟机：%f"
         for name in ${(ok)VM_VMX}; do
           if (( ${running[(Ie)${${VM_VMX[$name]}:l}]} )); then
             mark="%F{green}●%f"; state="%F{green}运行中%f"
@@ -422,6 +469,7 @@ vm() {
       local sub="${1:-}"; shift 2>/dev/null
       case "$sub" in
         list)
+          _vm_need $# 1 'snap list <name>' || return 1
           local vmx rc; vmx=$(_vm_resolve "${1:-}") || return 1
           _vm_echo listSnapshots "$vmx"
           vmrun -T fusion listSnapshots "$vmx"
@@ -430,13 +478,14 @@ vm() {
           return $rc   # listSnapshots 失败不能被 .vmsd 备注解析掩盖
           ;;
         create|delete|revert)
+          _vm_need $# 2 "snap $sub <name> <snap>" || return 1
           local vmx; vmx=$(_vm_resolve "${1:-}") || return 1
           case "$sub" in
             delete|revert) _vm_maybe_destroy "$1" || return 1 ;;
           esac
           local snap="${2:-}"
           if [[ -z "$snap" ]]; then
-            print -P "%F{red}✗ 用法: vm snap $sub <name> <snap>%f" >&2
+            _vm_p -P "%F{red}✗ 用法: vm snap $sub <name> <snap>%f" >&2
             return 1
           fi
           case "$sub" in
@@ -446,38 +495,39 @@ vm() {
           esac
           ;;
         *)
-          print -P "%F{red}✗ 未知快照子命令: ${sub:-<空>}（可选 list/create/delete/revert）%f" >&2
+          _vm_p -P "%F{red}✗ 未知快照子命令: ${sub:-<空>}（可选 list/create/delete/revert）%f" >&2
           return 1
           ;;
       esac
       ;;
 
     clone)
+      _vm_need $# 4 'clone <src> <新名> [full|linked] [snapshot]' || return 1
       local src="${1:-}" newname="${2:-}" mode="${3:-full}" snapname="${4:-}"
       if [[ -z "$src" || -z "$newname" ]]; then
-        print -P "%F{red}✗ 用法: vm clone <src> <新名> [full|linked] [snapshot]%f" >&2
+        _vm_p -P "%F{red}✗ 用法: vm clone <src> <新名> [full|linked] [snapshot]%f" >&2
         return 1
       fi
       if [[ "$mode" != "full" && "$mode" != "linked" ]]; then
-        print -P "%F{red}✗ 克隆类型必须是 full 或 linked，收到: $mode%f" >&2
+        _vm_p -P "%F{red}✗ 克隆类型必须是 full 或 linked，收到: $mode%f" >&2
         return 1
       fi
       # full 克隆不支持指定 snapshot：与其静默忽略第 4 个参数，不如显式拒绝
       if [[ "$mode" == "full" && -n "$snapname" ]]; then
-        print -P "%F{red}✗ full 克隆不支持指定 snapshot，请改用: vm clone $src $newname linked $snapname%f" >&2
+        _vm_p -P "%F{red}✗ full 克隆不支持指定 snapshot，请改用: vm clone $src $newname linked $snapname%f" >&2
         return 1
       fi
       # 新名必须是单个安全文件名：拒绝 / 、. 、.. 和控制字符，
       # 否则目标路径会逃逸出 VM_DIR（路径穿越）
       if [[ "$newname" == */* || "$newname" == . || "$newname" == .. || \
             "$newname" == *[[:cntrl:]]* ]]; then
-        print -P "%F{red}✗ 新名必须是单个文件名（不含 / 和控制字符，不能是 . 或 ..）: ${newname//\%/%%}%f" >&2
+        _vm_p -P "%F{red}✗ 新名必须是单个文件名（不含 / 和控制字符，不能是 . 或 ..）: ${newname//\%/%%}%f" >&2
         return 1
       fi
       local svmx; svmx=$(_vm_resolve "$src") || return 1
       # 短名被占用会导致克隆后两台 VM 无法区分，直接拒绝
       if [[ -n "${VM_LC[${newname:l}]}" ]]; then
-        print -P "%F{red}✗ 短名已被占用: ${newname//\%/%%}（vm vms 查看）%f" >&2
+        _vm_p -P "%F{red}✗ 短名已被占用: ${newname//\%/%%}（vm vms 查看）%f" >&2
         return 1
       fi
       # 注意：zsh 的 local 同一语句里后面的赋值展开时前面变量还未生效，必须分行
@@ -486,12 +536,12 @@ vm() {
       # 双重越界保险：VM_DIR 内有符号链接时，规范化后目标必须仍在 VM_DIR 里
       local realdir="${${VM_DIR%/}:A}" realdst="${dstdir:A}"
       if [[ "$realdst" != "$realdir"/* ]]; then
-        print -P "%F{red}✗ 目标路径越界: ${dstdir//\%/%%}%f" >&2
+        _vm_p -P "%F{red}✗ 目标路径越界: ${dstdir//\%/%%}%f" >&2
         return 1
       fi
       # 拒绝整个目标 bundle（目录或符号链接），而不只是 .vmx
       if [[ -e "$dstdir" || -L "$dstdir" ]]; then
-        print -P "%F{red}✗ 目标已存在: ${dstdir//\%/%%}%f" >&2
+        _vm_p -P "%F{red}✗ 目标已存在: ${dstdir//\%/%%}%f" >&2
         return 1
       fi
       local -a cloneargs=("$svmx" "$dst" "$mode" -cloneName="$newname")
@@ -500,12 +550,12 @@ vm() {
           local -a snames
           snames=("${(@f)$(_vm_snap_names "${svmx:r}.vmsd")}")
           if [[ -z "${snames[(re)$snapname]}" ]]; then
-            print -P "%F{red}✗ 源虚拟机没有名为 ${snapname//\%/%%} 的快照，先执行: vm snap list ${src//\%/%%}%f" >&2
+            _vm_p -P "%F{red}✗ 源虚拟机没有名为 ${snapname//\%/%%} 的快照，先执行: vm snap list ${src//\%/%%}%f" >&2
             return 1
           fi
           cloneargs+=(-snapshot="$snapname")
         elif ! grep -q '^snapshot[0-9]*\.displayName' "${svmx:r}.vmsd" 2>/dev/null; then
-          print -P "%F{red}✗ linked 克隆要求源虚拟机至少有一个快照，先执行: vm snap create ${src//\%/%%} <snap>%f" >&2
+          _vm_p -P "%F{red}✗ linked 克隆要求源虚拟机至少有一个快照，先执行: vm snap create ${src//\%/%%} <snap>%f" >&2
           return 1
         fi
         # 不指定快照名时不传 -snapshot，交由 vmrun 默认行为
@@ -515,13 +565,13 @@ vm() {
       vmrun -T fusion clone "${(@)cloneargs}"
       local rc=$?
       if (( rc == 0 )); then
-        print -P "%F{green}✓ 克隆完成，重新扫描以纳入管理…%f"
+        _vm_p -P "%F{green}✓ 克隆完成，重新扫描以纳入管理…%f"
         vm_scan
         vm vms
       else
         # 目标目录在调用前已确认不存在，是本命令创建的；失败时清掉残留，
         # 否则下次重试会被「目标已存在」挡住
-        print -P "%F{red}✗ 克隆失败，清理本次创建的目标目录%f" >&2
+        _vm_p -P "%F{red}✗ 克隆失败，清理本次创建的目标目录%f" >&2
         rm -rf -- "$dstdir"
       fi
       return $rc
@@ -533,47 +583,47 @@ vm() {
       for arg in "$@"; do
         case "$arg" in
           --yes|-y) yesflag=1 ;;
-          --*) print -P "%F{red}✗ 未知选项: $arg（删除支持 --yes）%f" >&2; return 1 ;;
+          --*) _vm_p -P "%F{red}✗ 未知选项: $arg（删除支持 --yes）%f" >&2; return 1 ;;
           *) if [[ -z "$name" ]]; then name="$arg"
-             else print -P "%F{red}✗ 多余参数: ${arg//\%/%%}，用法: vm delete <name> [--yes]%f" >&2; return 1
+             else _vm_p -P "%F{red}✗ 多余参数: ${arg//\%/%%}，用法: vm delete <name> [--yes]%f" >&2; return 1
              fi ;;
         esac
       done
-      [[ -n "$name" ]] || { print -P "%F{red}✗ 用法: vm delete <name> [--yes]%f" >&2; return 1; }
+      [[ -n "$name" ]] || { _vm_p -P "%F{red}✗ 用法: vm delete <name> [--yes]%f" >&2; return 1; }
       local key="${VM_LC[${name:l}]:-$name}"
       local vmx; vmx=$(_vm_resolve "$name") || return 1
       _vm_maybe_destroy "$name" || return 1       # 同名冲突的短名：拒绝，绝不二义删除
       # 不信任扫描缓存：删除前此刻重新验证 .vmx 真实存在
       if [[ ! -f "$vmx" ]]; then
-        print -P "%F{red}✗ $vmx 已不存在（扫描缓存过期），先 vm scan 刷新再试%f" >&2
+        _vm_p -P "%F{red}✗ $vmx 已不存在（扫描缓存过期），先 vm scan 刷新再试%f" >&2
         return 1
       fi
       # 运行中的 VM 拒绝删除
       local listout rc
       listout="$(vmrun -T fusion list 2>&1)"; rc=$?
       if (( rc != 0 )); then
-        print -P "%F{red}✗ 无法确认 VM 是否在运行（vmrun list 失败），拒绝删除%f" >&2
+        _vm_p -P "%F{red}✗ 无法确认 VM 是否在运行（vmrun list 失败），拒绝删除%f" >&2
         return $rc
       fi
       local -a running
       running=(${${(f)listout}:#Total running VMs:*})
       running=("${(@)running:l}")
       if (( ${running[(Ie)${vmx:l}]} )); then
-        print -P "%F{red}✗ ${name//\%/%%} 正在运行，拒绝删除；先 vm down（软）或 vm kill（强制）%f" >&2
+        _vm_p -P "%F{red}✗ ${name//\%/%%} 正在运行，拒绝删除；先 vm down（软）或 vm kill（强制）%f" >&2
         return 1
       fi
       # 位于默认目录之外（inventory-only / 外部路径）→ 需要额外确认
       local realdir="${${VM_DIR%/}:A}" realvmx="${vmx:A}" external=0
       if [[ "$realvmx" != "$realdir"/* ]]; then external=1; fi
       local dname="${VM_DISPLAY[$key]:-$name}"
-      print -P "%F{red}⚠ 即将永久删除（vmrun deleteVM，不可恢复）:%f" >&2
-      print -P "  %F{cyan}${name//\%/%%}%f（${${dname//\%/%%}}）" >&2
-      print -P "  ${vmx//\%/%%}" >&2
-      (( external )) && print -P "%F{yellow}  ⚠ 该 VM 不在 ${${VM_DIR//\%/%%}} 内（清单/inventory-only 路径）%f" >&2
+      _vm_p -P "%F{red}⚠ 即将永久删除（vmrun deleteVM，不可恢复）:%f" >&2
+      _vm_p -P "  %F{cyan}${name//\%/%%}%f（${${dname//\%/%%}}）" >&2
+      _vm_p -P "  ${vmx//\%/%%}" >&2
+      (( external )) && _vm_p -P "%F{yellow}  ⚠ 该 VM 不在 ${${VM_DIR//\%/%%}} 内（清单/inventory-only 路径）%f" >&2
       if (( ! yesflag )); then
         # 非交互环境必须显式 --yes，不能默认跳过确认
         if [[ ! -t 0 ]]; then
-          print -P "%F{yellow}✗ 非交互环境请显式加 --yes 确认删除%f" >&2
+          _vm_p -P "%F{yellow}✗ 非交互环境请显式加 --yes 确认删除%f" >&2
           return 1
         fi
         local typed
@@ -581,7 +631,7 @@ vm() {
         read -r typed
         typed="${typed%$'\r'}"      # 某些终端/伪终端会带回车符
         if [[ "${typed:l}" != "${name:l}" ]]; then
-          print -P "%F{yellow}输入不匹配，已取消%f" >&2
+          _vm_p -P "%F{yellow}输入不匹配，已取消%f" >&2
           return 1
         fi
         if (( external )); then
@@ -589,7 +639,7 @@ vm() {
           read -r typed
           typed="${typed%$'\r'}"
           if [[ "${typed:l}" != "yes" ]]; then
-            print -P "%F{yellow}未确认，已取消%f" >&2
+            _vm_p -P "%F{yellow}未确认，已取消%f" >&2
             return 1
           fi
         fi
@@ -598,7 +648,7 @@ vm() {
       vmrun -T fusion deleteVM "$vmx"
       rc=$?
       if (( rc == 0 )); then
-        print -P "%F{green}✓ 已删除 ${name//\%/%%}，重新扫描…%f"
+        _vm_p -P "%F{green}✓ 已删除 ${name//\%/%%}，重新扫描…%f"
         vm_scan
         vm vms
       fi
@@ -606,29 +656,32 @@ vm() {
       ;;
 
     list)
+      _vm_need $# 0 'list' || return 1
       _vm_power list
       ;;
     vms)
-      (( ${#VM_VMX} )) || { print -P "%F{yellow}未发现任何虚拟机，执行: vm scan%f"; return 0; }
+      _vm_need $# 0 'vms' || return 1
+      (( ${#VM_VMX} )) || { _vm_p -P "%F{yellow}未发现任何虚拟机，执行: vm scan%f"; return 0; }
       local n p d
       local -i nw=8 dw=8
       for n in ${(k)VM_VMX}; do
         (( ${#n} > nw )) && nw=${#n}
         (( ${#VM_DISPLAY[$n]} > dw )) && dw=${#VM_DISPLAY[$n]}
       done
-      print -P "%F{green}已发现 ${#VM_VMX} 台虚拟机：%f"
+      _vm_p -P "%F{green}已发现 ${#VM_VMX} 台虚拟机：%f"
       for n in ${(ok)VM_VMX}; do
         p="${VM_VMX[$n]}"
         d="${${VM_DISPLAY[$n]}//\%/%%}"
-        print -rP "  %F{cyan}${(r:nw:)${n//\%/%%}}%f ${(r:dw:)d} ${p//\%/%%}"
+        _vm_p -rP "  %F{cyan}${(r:nw:)${n//\%/%%}}%f ${(r:dw:)d} ${p//\%/%%}"
       done
       ;;
     scan)
+      _vm_need $# 0 'scan' || return 1
       vm_scan
-      print -P "%F{green}✓ 扫描完成，共发现 ${#VM_VMX} 台虚拟机%f"
+      _vm_p -P "%F{green}✓ 扫描完成，共发现 ${#VM_VMX} 台虚拟机%f"
       ;;
     *)
-      print -P "%F{red}✗ 未知子命令: $cmd%f" >&2
+      _vm_p -P "%F{red}✗ 未知子命令: $cmd%f" >&2
       vm_help >&2
       return 1
       ;;

@@ -40,10 +40,10 @@ INV
 
 write_vmrun() {
   # 环境开关（需 export）：FAKE_IP / FAKE_IP_ERR / FAKE_SNAP_FAIL / FAKE_STOP_FAIL
-  # 每次调用把完整 argv 记进 calls.log 供契约断言
+  # 每次调用把 argv 逐参数记进 calls.log（| 分隔）供契约断言
   cat > "$T/vmrun" <<FAKE
 #!/bin/zsh
-print -r -- "vmrun \$*" >> "$T/calls.log"
+{ print -rn -- "vmrun"; local _a; for _a in "\$@"; do print -rn -- "|\$_a"; done; print; } >> "$T/calls.log"
 sub="\$3"
 case "\$sub" in
   list)
@@ -59,6 +59,9 @@ case "\$sub" in
   listSnapshots)
     if [[ -n "\$FAKE_SNAP_FAIL" ]]; then echo "Error: snapshot list failed"; exit 1; fi
     echo "Total snapshots: 2"; echo "base"; echo "after-setup" ;;
+  snapshot|deleteSnapshot|revertToSnapshot)
+    if [[ -n "\$FAKE_SNAP_FAIL" ]]; then echo "Error: snapshot op failed"; exit 1; fi
+    echo "fake vmrun: \$sub" ;;
   stop)
     if [[ -n "\$FAKE_STOP_FAIL" ]]; then echo "Error: VMware Tools are not running in this VM"; exit 1; fi
     echo "fake vmrun: stop" ;;
@@ -138,9 +141,10 @@ unset FAKE_IP_ERR
 eq "vmrun 非零退出时输出含 IP 也不采信" "1" "$rc"
 out="$(vm ip 'kali linux' 2>/dev/null)"
 eq "stdout 仅 IP（可被 \$() 捕获）" "192.168.11.22" "$out"
+: > "$T/calls.log"
 out="$(vm ip 'kali linux' -w 2>/dev/null)"
 eq "后置 -w 正常" "192.168.11.22" "$out"
-grep -q "getGuestIPAddress .* -wait" "$T/calls.log"
+grep -Fq "getGuestIPAddress|$T/vms/Kali Linux.vmwarevm/Kali Linux.vmx|-wait" "$T/calls.log"
 ok "-w 透传为 vmrun -wait"
 
 # ── % 转义与错误路径 ─────────────────────────────────────────────
@@ -179,6 +183,25 @@ export FAKE_SNAP_FAIL
 out="$(vm snap list 'kali linux' 2>/dev/null)"; rc=$?
 unset FAKE_SNAP_FAIL
 eq "listSnapshots 失败 rc 透传（不被备注解析掩盖）" "1" "$rc"
+
+# create/delete/revert 的 argv 契约与错误码（Kali 不冲突、未运行，可正常调用）
+: > "$T/calls.log"
+out="$(vm snap create 'kali linux' mysnap 2>&1)"
+grep -Fq -- "|snapshot|$T/vms/Kali Linux.vmwarevm/Kali Linux.vmx|mysnap" "$T/calls.log"
+ok "snap create argv（snapshot vmx name）"
+: > "$T/calls.log"
+out="$(vm snap delete 'kali linux' mysnap 2>&1)"
+grep -Fq -- "|deleteSnapshot|$T/vms/Kali Linux.vmwarevm/Kali Linux.vmx|mysnap" "$T/calls.log"
+ok "snap delete argv（deleteSnapshot vmx name）"
+: > "$T/calls.log"
+out="$(vm snap revert 'kali linux' mysnap 2>&1)"
+grep -Fq -- "|revertToSnapshot|$T/vms/Kali Linux.vmwarevm/Kali Linux.vmx|mysnap" "$T/calls.log"
+ok "snap revert argv（revertToSnapshot vmx name）"
+FAKE_SNAP_FAIL=1
+export FAKE_SNAP_FAIL
+out="$(vm snap delete 'kali linux' mysnap 2>&1)"; rc=$?
+unset FAKE_SNAP_FAIL
+eq "snap delete 失败 rc 透传" "1" "$rc"
 
 # ── scan ─────────────────────────────────────────────────────────
 print -P "%F{cyan}== scan ==%f"
@@ -243,11 +266,12 @@ out="$(vm clone 'kali linux' evil full 2>&1)"; rc=$?
 chk "目标 bundle 为符号链接时拒绝（越界检查拦截）" "目标路径越界"
 eq "符号链接目标 rc=1" "1" "$rc"
 
+: > "$T/calls.log"
 out="$(vm clone 'kali linux' newvm full 2>&1)"
 chk "clone 调用 vmrun" "fake vmrun: clone"
 [[ -d "$T/vms/newvm.vmwarevm" ]] && { print -P "  %F{green}PASS%f: clone 前创建目标目录"; } \
   || { print -P "  %F{red}FAIL%f: clone 前创建目标目录"; fail=1; }
-grep -Fq -- "$T/vms/newvm.vmwarevm/newvm.vmx full -cloneName=newvm" "$T/calls.log"
+grep -Fq -- "$T/vms/newvm.vmwarevm/newvm.vmx|full|-cloneName=newvm" "$T/calls.log"
 ok "clone argv 契约（目标路径 + -cloneName）"
 out="$(vm clone 'kali linux' newvm full 2>&1)"; rc=$?
 chk "目标已存在时拒绝" "目标已存在"
@@ -255,9 +279,10 @@ eq "目标已存在 rc=1" "1" "$rc"
 out="$(vm clone 'Debian' x linked 2>&1)"; rc=$?
 chk "linked 无快照时拒绝并指引" "至少有一个快照"
 eq "linked 无快照 rc=1" "1" "$rc"
+: > "$T/calls.log"
 out="$(vm clone 'kali linux' linkedvm linked base 2>&1)"
 chk "linked 指定快照时克隆成功" "linkedvm"
-grep -Fq -- "linked -cloneName=linkedvm -snapshot=base" "$T/calls.log"
+grep -Fq -- "|linked|-cloneName=linkedvm|-snapshot=base" "$T/calls.log"
 ok "linked clone argv 契约（-snapshot=base）"
 out="$(vm clone 'kali linux' linkedvm2 linked nosuch 2>&1)"; rc=$?
 chk "linked 指定不存在的快照时拒绝" "没有名为 nosuch 的快照"
@@ -358,6 +383,39 @@ vm scan >/dev/null 2>&1
 out="$(vm vms 2>&1)"
 [[ "$out" != *50%off* ]]
 ok "删除后重新扫描，VM 已不在列表"
+
+# ── 回归：多余参数拒绝 + vmrun 缺失 + 非终端无色 ───────────────
+print -P "%F{cyan}== 参数契约与颜色 ==%f"
+
+# 6. 多余参数/拼写不再被静默忽略
+out="$(vm up 'kali linux' typo 2>&1)"; rc=$?
+eq "vm up 多余参数 rc=1" "1" "$rc"
+chk "报参数过多" "参数过多"
+out="$(vm ip 'kali linux' typo 2>&1)"; rc=$?
+eq "vm ip 多余参数 rc=1" "1" "$rc"
+out="$(vm status 'kali linux' typo 2>&1)"; rc=$?
+eq "vm status 多余参数 rc=1" "1" "$rc"
+out="$(vm snap list 'kali linux' typo 2>&1)"; rc=$?
+eq "vm snap list 多余参数 rc=1" "1" "$rc"
+out="$(vm snap create 'kali linux' s1 typo 2>&1)"; rc=$?
+eq "vm snap create 多余参数 rc=1" "1" "$rc"
+out="$(vm clone 'kali linux' x full base typo 2>&1)"; rc=$?
+eq "vm clone 多余参数 rc=1" "1" "$rc"
+out="$(vm vms typo 2>&1)"; rc=$?
+eq "vm vms 多余参数 rc=1" "1" "$rc"
+out="$(vm scan typo 2>&1)"; rc=$?
+eq "vm scan 多余参数 rc=1" "1" "$rc"
+
+# 7. vmrun 不可用（命令缺失/失败）：status 必须显式失败，不得当「全部未运行」。
+#    用函数遮蔽 vmrun 模拟「找不到命令」，避免本机装了真实 Fusion 而测不到。
+out="$(zsh -c 'vmrun() { print -u2 "vmrun: command not found"; return 127; }; source "$1" >/dev/null 2>&1; vm status "kali linux"' _ "$VM_ZSH" 2>&1)"; rc=$?
+eq "vmrun 缺失时 status rc=127" "127" "$rc"
+chk "缺失时提示查询失败" "无法查询运行状态"
+
+# 8. 非终端（命令替换/管道）输出不含 ANSI 颜色转义
+out="$(vm vms 2>&1)"
+[[ "$out" != *$'\e['* ]]
+ok "非终端输出不含 ANSI 颜色转义"
 
 # ── 补全注册时序 ─────────────────────────────────────────────────
 print -P "%F{cyan}== 补全注册时序 ==%f"

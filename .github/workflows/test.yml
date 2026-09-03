@@ -1,0 +1,16 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      # 脚本面向 macOS/zsh/VMware Fusion；语法 + 沙盒回归测试不依赖真实 Fusion
+      - name: zsh syntax check
+        run: zsh -n vm.zsh
+      - name: run sandbox tests
+        run: zsh tests/vm_test.zsh
