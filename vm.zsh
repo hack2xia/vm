@@ -257,7 +257,7 @@ _vm_parse_wait() {
   while (( $# )); do
     case "$1" in
       -w|--wait) _vm_waitflag=1 ;;
-      --)        rest+=("$@"); break ;;   # -- 之后视为透传参数，不再解析
+      --)        shift; rest+=("$@"); break ;;   # -- 本身消费掉，之后视为透传参数
       *)         rest+=("$1") ;;
     esac
     shift
@@ -304,14 +304,23 @@ _vm_tools() {
   esac
 }
 
+# 字符串的屏幕显示宽度（CJK 等宽字符按 2 列）：用 (mr:N:) 按列补齐后反推。
+# 列对齐必须按显示宽度而非字符数，否则中文名的行会把后续列顶偏。
+_vm_dispwidth() {
+  emulate -L zsh
+  local s="$1" p="${(mr:1000:)1}"
+  print -rn -- "$(( 1000 + ${#s} - ${#p} ))"
+}
+
 # 状态表格的一行：$1 = 短名，$2 = 圆点（含颜色），$3 = 运行状态，$4 = Tools 状态
-# $5/$6 = 名称列/显示名列的宽度（缺省 14）
+# $5/$6 = 名称列/显示名列的显示宽度（缺省 14）；padding 用 (mr:) 按屏幕列宽
 _vm_status_line() {
   local n="$1" m="$2" s="$3" t="$4" nw="${5:-14}" dw="${6:-14}" a b c d
-  a="${(r:nw:)${${n}//\%/%%}}"
-  b="${(r:dw:)${${VM_DISPLAY[$n]}//\%/%%}}"
-  c="${(r:8:)${VM_STATE[$n]:-未知}}"
-  d="${(r:13:)${t:-unknown}}"
+  # 先按列宽补齐再转义 %：顺序反了会让含 % 的名字按转义后的长度补齐，列被顶偏
+  a="${${(mr:nw:)n}//\%/%%}"
+  b="${${(mr:dw:)VM_DISPLAY[$n]}//\%/%%}"
+  c="${(mr:8:)${VM_STATE[$n]:-未知}}"
+  d="${(mr:13:)${t:-unknown}}"
   _vm_p -rP -- "  $m %F{cyan}${a}%f ${b} ${c} ${d} $s"
 }
 
@@ -443,15 +452,17 @@ vm() {
         else
           mark="%F{white}○%f"; state="未运行"
         fi
-        _vm_status_line "$name" "$mark" "$state" "$(_vm_tools "$vmx")" "${#name}" "${#VM_DISPLAY[$name]}"
+        _vm_status_line "$name" "$mark" "$state" "$(_vm_tools "$vmx")" \
+          "$(_vm_dispwidth "$name")" "$(_vm_dispwidth "${VM_DISPLAY[$name]}")"
         _vm_p -rP "      .vmx: ${${VM_VMX[$name]}//\%/%%}"
       else
         (( ${#VM_VMX} )) || { _vm_p -P "%F{yellow}未发现任何虚拟机，执行: vm scan%f"; return 0; }
-        # 列宽取最长名称，避免长名字被 (r:14:) 截断
-        local -i nw=8 dw=8
+        # 列宽取最长名称的显示宽度（宽字符按 2 列），避免长名/CJK 名顶偏后续列
+        local -i nw=8 dw=8 wn wd
         for n in ${(k)VM_VMX}; do
-          (( ${#n} > nw )) && nw=${#n}
-          (( ${#VM_DISPLAY[$n]} > dw )) && dw=${#VM_DISPLAY[$n]}
+          wn=$(_vm_dispwidth "$n"); wd=$(_vm_dispwidth "${VM_DISPLAY[$n]}")
+          (( wn > nw )) && nw=wn
+          (( wd > dw )) && dw=wd
         done
         _vm_p -P "%F{green}共 ${#VM_VMX} 台虚拟机：%f"
         for name in ${(ok)VM_VMX}; do
@@ -663,16 +674,17 @@ vm() {
       _vm_need $# 0 'vms' || return 1
       (( ${#VM_VMX} )) || { _vm_p -P "%F{yellow}未发现任何虚拟机，执行: vm scan%f"; return 0; }
       local n p d
-      local -i nw=8 dw=8
+      local -i nw=8 dw=8 wn wd
       for n in ${(k)VM_VMX}; do
-        (( ${#n} > nw )) && nw=${#n}
-        (( ${#VM_DISPLAY[$n]} > dw )) && dw=${#VM_DISPLAY[$n]}
+        wn=$(_vm_dispwidth "$n"); wd=$(_vm_dispwidth "${VM_DISPLAY[$n]}")
+        (( wn > nw )) && nw=wn
+        (( wd > dw )) && dw=wd
       done
       _vm_p -P "%F{green}已发现 ${#VM_VMX} 台虚拟机：%f"
       for n in ${(ok)VM_VMX}; do
         p="${VM_VMX[$n]}"
-        d="${${VM_DISPLAY[$n]}//\%/%%}"
-        _vm_p -rP "  %F{cyan}${(r:nw:)${n//\%/%%}}%f ${(r:dw:)d} ${p//\%/%%}"
+        d="${${(mr:dw:)VM_DISPLAY[$n]}//\%/%%}"   # 先补齐再转义 %
+        _vm_p -rP "  %F{cyan}${${(mr:nw:)n}//\%/%%}%f ${d} ${p//\%/%%}"
       done
       ;;
     scan)
@@ -761,7 +773,8 @@ _vm_comp() {
           esac
           ;;
         up|down|kill|suspend|pause|unpause|reset|status|delete)
-          _wanted vms expl '虚拟机' compadd -a vms
+          # 这些命令只收一个 VM 名（多余参数会被 _vm_need 拒绝），只在第一位补全
+          (( CURRENT == 2 )) && _wanted vms expl '虚拟机' compadd -a vms
           ;;
       esac
       ;;

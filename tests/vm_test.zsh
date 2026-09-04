@@ -14,11 +14,13 @@ trap 'rm -rf "$T"' EXIT
 # ── 夹具 ─────────────────────────────────────────────────────────
 # vmlist3/vmlist4 是两台不同路径但 bundle 同名（Debian）的 VM，覆盖短名冲突。
 mkdir -p "$T/vms/Kali Linux.vmwarevm" "$T/vms/WinSer2019.vmwarevm" \
-         "$T/vms/50%off.vmwarevm" "$T/other/Debian.vmwarevm" \
+         "$T/vms/50%off.vmwarevm" "$T/vms/中文虚拟机.vmwarevm" \
+         "$T/other/Debian.vmwarevm" \
          "$T/other2/Debian.vmwarevm" "$T/emptydir"
 touch "$T/vms/Kali Linux.vmwarevm/Kali Linux.vmx" \
       "$T/vms/WinSer2019.vmwarevm/Win.vmx" \
       "$T/vms/50%off.vmwarevm/50%off.vmx" \
+      "$T/vms/中文虚拟机.vmwarevm/中文虚拟机.vmx" \
       "$T/other/Debian.vmwarevm/Debian.vmx" \
       "$T/other2/Debian.vmwarevm/Debian.vmx"
 
@@ -36,6 +38,9 @@ vmlist3.State = ""
 vmlist4.config = "$T/other2/Debian.vmwarevm/Debian.vmx"
 vmlist4.DisplayName = "Debian 12 mirror"
 vmlist4.State = ""
+vmlist5.config = "$T/vms/中文虚拟机.vmwarevm/中文虚拟机.vmx"
+vmlist5.DisplayName = "中文虚拟机 甲"
+vmlist5.State = "normal"
 INV
 
 write_vmrun() {
@@ -80,40 +85,57 @@ export PATH="$T:$PATH" VM_DIR="$T/vms" VM_INVENTORY="$T/inventory"
 source "$VM_ZSH"
 
 fail=0
-chk() {  # chk <描述> <期望包含的子串>，被检内容在 $out
+chk() {  # chk <描述> <期望包含的子串>，被检内容在 $out（描述里的 % 需转义防 print -P 吃掉）
   if [[ "$out" == *"$2"* ]]; then
-    print -P "  %F{green}PASS%f: $1"
+    _vm_p -P "  %F{green}PASS%f: ${1//\%/%%}"
   else
-    print -P "  %F{red}FAIL%f: $1"; print "    期望含: $2"; print "    实际: $out"; fail=1
+    _vm_p -P "  %F{red}FAIL%f: ${1//\%/%%}"; print "    期望含: $2"; print "    实际: $out"; fail=1
   fi
 }
 eq() {  # eq <描述> <期望值> <实际值>
   if [[ "$3" == "$2" ]]; then
-    print -P "  %F{green}PASS%f: $1"
+    _vm_p -P "  %F{green}PASS%f: ${1//\%/%%}"
   else
-    print -P "  %F{red}FAIL%f: $1"; print "    期望: $2"; print "    实际: $3"; fail=1
+    _vm_p -P "  %F{red}FAIL%f: ${1//\%/%%}"; print "    期望: $2"; print "    实际: $3"; fail=1
   fi
 }
 ok() {  # ok <描述>，检查紧邻上一条命令的退出码
   if (( $? == 0 )); then
-    print -P "  %F{green}PASS%f: $1"
+    _vm_p -P "  %F{green}PASS%f: ${1//\%/%%}"
   else
-    print -P "  %F{red}FAIL%f: $1"; fail=1
+    _vm_p -P "  %F{red}FAIL%f: ${1//\%/%%}"; fail=1
   fi
 }
 
 # ── 发现 ─────────────────────────────────────────────────────────
-print -P "%F{cyan}== 发现 ==%f"
+_vm_p -P "%F{cyan}== 发现 ==%f"
 out="$(vm vms 2>&1)"
-chk "清单+目录共发现 4 台（冲突的镜像 Debian 不计入）" "已发现 4 台"
+chk "清单+目录共发现 5 台（冲突的镜像 Debian 不计入）" "已发现 5 台"
 chk "目录外 VM 纳入" "Debian"
 chk "短名取磁盘大小写（Kali Linux）" "Kali Linux"
 out="$(vm scan 2>&1)"   # 冲突警告只在扫描时输出
 chk "短名冲突有警告，不静默合并" "短名冲突"
 chk "冲突时保留排序靠前的清单条目路径" "$T/other/Debian.vmwarevm/Debian.vmx"
 
+# CJK 显示宽：宽字符按 2 列计
+eq "_vm_dispwidth 中文按 2 列" "4" "$(_vm_dispwidth '名字')"
+eq "_vm_dispwidth 混排" "3" "$(_vm_dispwidth '中a')"
+# vms 每行路径列起始的显示宽度必须一致（CJK 名/显示名不把列顶偏）
+out="$(vm vms 2>/dev/null)"
+prefws=()
+same=1
+for l in ${(f)out}; do
+  [[ "$l" == *"$T/"* ]] || continue
+  pref="${l%%$T/*}"
+  prefws+=($(_vm_dispwidth "$pref"))
+done
+(( ${#prefws} >= 2 )) || same=0
+w0="${prefws[1]}"
+for w in "${prefws[@]}"; do (( w == w0 )) || same=0; done
+eq "vms 各行路径列显示宽度一致（含 CJK 行）" "1" "$same"
+
 # ── status ───────────────────────────────────────────────────────
-print -P "%F{cyan}== status ==%f"
+_vm_p -P "%F{cyan}== status ==%f"
 out="$(vm status 2>&1)"
 chk "运行中（vmrun 回显与清单路径匹配）" "运行中"
 chk "paused 状态透出" "paused"
@@ -125,7 +147,7 @@ out="$(vm status 'KALI LINUX' 2>/dev/null)"
 chk "stdout 不含 trace" ".vmx:"
 
 # ── ip ─────────────────────────────────────────────────────────
-print -P "%F{cyan}== ip ==%f"
+_vm_p -P "%F{cyan}== ip ==%f"
 FAKE_IP=""
 out="$(vm ip 'kali linux' 2>&1)"
 chk "未拿到 IP 提示" "未拿到 IP"
@@ -146,9 +168,11 @@ out="$(vm ip 'kali linux' -w 2>/dev/null)"
 eq "后置 -w 正常" "192.168.11.22" "$out"
 grep -Fq "getGuestIPAddress|$T/vms/Kali Linux.vmwarevm/Kali Linux.vmx|-wait" "$T/calls.log"
 ok "-w 透传为 vmrun -wait"
+out="$(vm ip -- 'kali linux' 2>/dev/null)"
+eq "-- 之后名字正常解析（-- 被消费而非透传）" "192.168.11.22" "$out"
 
 # ── % 转义与错误路径 ─────────────────────────────────────────────
-print -P "%F{cyan}== % 转义与错误路径 ==%f"
+_vm_p -P "%F{cyan}== %% 转义与错误路径 ==%f"
 out="$(vm up 50%off 2>&1)"
 chk "回显路径完整（% 不被 prompt 展开吃掉）" "50%off.vmwarevm/50%off.vmx"
 out="$(vm up nope 2>&1)"; rc=$?
@@ -165,7 +189,7 @@ chk "缺参数给用法提示" "缺少虚拟机名"
 eq "缺参数 rc=1" "1" "$rc"
 
 # ── 快照 ─────────────────────────────────────────────────────────
-print -P "%F{cyan}== 快照 ==%f"
+_vm_p -P "%F{cyan}== 快照 ==%f"
 out="$(vm snap list 'kali linux' 2>&1)"
 chk "listSnapshots 输出" "after-setup"
 # .vmsd 放在 .vmx 旁（${vmx:r}.vmsd = Kali Linux.vmsd）
@@ -204,17 +228,17 @@ unset FAKE_SNAP_FAIL
 eq "snap delete 失败 rc 透传" "1" "$rc"
 
 # ── scan ─────────────────────────────────────────────────────────
-print -P "%F{cyan}== scan ==%f"
+_vm_p -P "%F{cyan}== scan ==%f"
 # 加一个与目录不同名的 .vmx 才会触发「多个 .vmx」警告（同名优先命中，不警告）
 touch "$T/vms/WinSer2019.vmwarevm/Other.vmx"
 out="$(vm scan 2>&1)"
 chk "多 vmx 警告" "多个 .vmx"
 rm "$T/vms/WinSer2019.vmwarevm/Other.vmx"
 out="$(vm scan 2>&1)"
-chk "恢复后仍 4 台" "共发现 4 台"
+chk "恢复后仍 5 台" "共发现 5 台"
 
 # ── 失效清单路径 ─────────────────────────────────────────────────
-print -P "%F{cyan}== 失效清单路径 ==%f"
+_vm_p -P "%F{cyan}== 失效清单路径 ==%f"
 # bundle 名与磁盘一致（Kali Linux）但 .vmx 不存在 → 不能覆盖磁盘扫描结果
 cat > "$T/inventory" <<INV
 .encoding = "UTF-8"
@@ -232,10 +256,10 @@ out="$(vm scan 2>&1)"
 chk "清单路径失效有警告" "路径失效"
 out="$(vm vms 2>&1)"
 chk "失效后保留磁盘扫描的路径" "$T/vms/Kali Linux.vmwarevm/Kali Linux.vmx"
-chk "失效后仍 4 台" "已发现 4 台"
+chk "失效后仍 5 台" "已发现 5 台"
 
 # ── down / clone ─────────────────────────────────────────────────
-print -P "%F{cyan}== down / clone ==%f"
+_vm_p -P "%F{cyan}== down / clone ==%f"
 FAKE_STOP_FAIL=1
 export FAKE_STOP_FAIL
 out="$(vm down 'kali linux' 2>&1)"; rc=$?
@@ -269,8 +293,8 @@ eq "符号链接目标 rc=1" "1" "$rc"
 : > "$T/calls.log"
 out="$(vm clone 'kali linux' newvm full 2>&1)"
 chk "clone 调用 vmrun" "fake vmrun: clone"
-[[ -d "$T/vms/newvm.vmwarevm" ]] && { print -P "  %F{green}PASS%f: clone 前创建目标目录"; } \
-  || { print -P "  %F{red}FAIL%f: clone 前创建目标目录"; fail=1; }
+[[ -d "$T/vms/newvm.vmwarevm" ]] && { _vm_p -P "  %F{green}PASS%f: clone 前创建目标目录"; } \
+  || { _vm_p -P "  %F{red}FAIL%f: clone 前创建目标目录"; fail=1; }
 grep -Fq -- "$T/vms/newvm.vmwarevm/newvm.vmx|full|-cloneName=newvm" "$T/calls.log"
 ok "clone argv 契约（目标路径 + -cloneName）"
 out="$(vm clone 'kali linux' newvm full 2>&1)"; rc=$?
@@ -289,7 +313,7 @@ chk "linked 指定不存在的快照时拒绝" "没有名为 nosuch 的快照"
 eq "不存在快照 rc=1" "1" "$rc"
 
 # ── 回归：失败显式化 + 同名冲突保护 ─────────────────────────────
-print -P "%F{cyan}== 失败显式化与同名冲突保护 ==%f"
+_vm_p -P "%F{cyan}== 失败显式化与同名冲突保护 ==%f"
 
 # 1. vmrun list 失败：status 必须报错，不能把全部 VM 标成「未运行」
 FAKE_LIST_FAIL=1
@@ -355,7 +379,7 @@ out="$(vm clone 'kali linux' retryvm full 2>&1)"
 chk "清理后可立即重试成功" "克隆完成"
 
 # 5. vm delete：运行中/冲突/路径失效/非交互无 --yes 均拒绝；--yes 删除成功并重扫消失
-print -P "%F{cyan}== vm delete 防护 ==%f"
+_vm_p -P "%F{cyan}== vm delete 防护 ==%f"
 # 5.1 运行中的 VM（fake vmrun list 恒报 Kali 在运行）
 out="$(vm delete 'kali linux' --yes 2>&1)"; rc=$?
 eq "运行中 VM 拒绝删除" "1" "$rc"
@@ -385,7 +409,7 @@ out="$(vm vms 2>&1)"
 ok "删除后重新扫描，VM 已不在列表"
 
 # ── 回归：多余参数拒绝 + vmrun 缺失 + 非终端无色 ───────────────
-print -P "%F{cyan}== 参数契约与颜色 ==%f"
+_vm_p -P "%F{cyan}== 参数契约与颜色 ==%f"
 
 # 6. 多余参数/拼写不再被静默忽略
 out="$(vm up 'kali linux' typo 2>&1)"; rc=$?
@@ -418,7 +442,7 @@ out="$(vm vms 2>&1)"
 ok "非终端输出不含 ANSI 颜色转义"
 
 # ── 补全注册时序 ─────────────────────────────────────────────────
-print -P "%F{cyan}== 补全注册时序 ==%f"
+_vm_p -P "%F{cyan}== 补全注册时序 ==%f"
 # 顺序一（compinit 先行）：用假 compdef 模拟 compinit 已执行，
 # source 时应立刻收到 compdef _vm_comp vm 的注册调用。
 # VM_DIR/VM_INVENTORY/PATH 已 export，子进程直接继承。
@@ -432,10 +456,69 @@ ok "vm.zsh 目录已加入 fpath"
 [[ -f "${VM_ZSH:A:h}/_vm" ]]
 ok "_vm 补全入口文件存在"
 
+# ── 补全行为 ─────────────────────────────────────────────────
+_vm_p -P "%F{cyan}== 补全行为 ==%f"
+# 桩：_arguments 按 CURRENT 分流 state；_describe/_values/_alternative 记录实参；
+# _wanted 透传执行内部命令；compadd 展开 -a <数组名>（动态作用域可见 _vm_comp 的局部数组）。
+typeset -a _comp_out=()
+_arguments()   { (( ${CURRENT:-1} == 1 )) && state=cmd || state=args }
+_describe()    { _comp_out+=("describe:${(j: :)${(P@)4}}") }
+_values()      { _comp_out+=("values:$*") }
+_alternative() { _comp_out+=("alternative:$*") }
+_wanted()      { shift 3; "$@" }
+compadd() {
+  local -a out=()
+  while (( $# )); do
+    case "$1" in
+      -a) shift; out+=("${(P@)1}"); shift ;;
+      --) shift; out+=("$@"); break ;;
+      -*) shift ;;
+      *)  out+=("$1"); shift ;;
+    esac
+  done
+  _comp_out+=("compadd:${(j: :)out}")
+}
+# $1=CURRENT，其余=words（已去掉 vm 本身，words[1] 为子命令）
+_vm_comp_probe() {
+  local CURRENT="$1" state=""
+  local -a words=("${@[2,-1]}")
+  _comp_out=()
+  _vm_comp
+  print -rl -- "${_comp_out[@]}"
+}
+
+out="$(_vm_comp_probe 1 '')"
+chk "补全子命令列表" "up:启动"
+chk "补全含 delete" "delete:永久删除"
+out="$(_vm_comp_probe 2 snap '')"
+chk "snap 补子命令" "list[列出]"
+out="$(_vm_comp_probe 3 snap create '')"
+chk "snap create 第三参补 VM 名" "Kali Linux"
+out="$(_vm_comp_probe 4 snap create 'Kali Linux' '')"
+chk "snap create 第四参从 .vmsd 补快照名" "base"
+chk "快照名含 after-setup" "after-setup"
+out="$(_vm_comp_probe 4 snap list 'Kali Linux' '')"
+[[ "$out" != *base* ]]
+ok "snap list 第四参不补快照名"
+out="$(_vm_comp_probe 2 up '')"
+chk "up 第一参补 VM 名" "Kali Linux"
+out="$(_vm_comp_probe 3 up 'Kali Linux' '')"
+eq "up 只收一个参数，第二位不再补 VM 名" "" "$out"
+out="$(_vm_comp_probe 4 clone 'Kali Linux' newvm '')"
+chk "clone 第四参补 full/linked" "full[完整克隆]"
+out="$(_vm_comp_probe 5 clone 'Kali Linux' newvm linked '')"
+chk "clone linked 第五参补快照名" "after-setup"
+out="$(_vm_comp_probe 5 clone 'Kali Linux' newvm full '')"
+eq "clone full 第五参不补快照名" "" "$out"
+out="$(_vm_comp_probe 2 ip '')"
+chk "ip 第一参补 VM 名与 -w" "-w"
+out="$(_vm_comp_probe 3 ip -w '')"
+chk "ip -w 之后补 VM 名" "Kali Linux"
+
 print ""
 if (( fail )); then
-  print -P "%F{red}HAS FAILURES%f"
+  _vm_p -P "%F{red}HAS FAILURES%f"
   exit 1
 else
-  print -P "%F{green}ALL PASS%f"
+  _vm_p -P "%F{green}ALL PASS%f"
 fi
