@@ -2,15 +2,31 @@ name: test
 
 on:
   push:
+    branches: [main]
+    tags: ['v*']
   pull_request:
+
+# 最小权限：只读 checkout 足够，测试不发布任何产物
+permissions:
+  contents: read
+
+# 同分支重复推送时取消旧的运行，避免排队浪费 macOS 配额
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
     runs-on: macos-latest
+    # 沙盒回归含 zpty 交互测试，正常 1-2 分钟；超时视为挂死并显式失败
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       # 脚本面向 macOS/zsh/VMware Fusion；语法 + 沙盒回归测试不依赖真实 Fusion
       - name: zsh syntax check
-        run: zsh -n vm.zsh
+        run: |
+          zsh -n vm.zsh
+          zsh -n _vm
+          for f in tests/*.zsh; do zsh -n "$f"; done
       - name: run sandbox tests
         run: zsh tests/vm_test.zsh

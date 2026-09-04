@@ -59,6 +59,7 @@ vm delete <name> [--yes] [--allow-external]
                                          VM 还须加 --allow-external；-- 之后的名字
                                          按位置解析）
 vm help                                  完整帮助
+vm version                               显示版本（stdout 纯净可捕获）
 ```
 
 zsh 补全（子命令 / VM 短名 / 快照名）对两种加载顺序都能注册：`compinit` 先于本文件执行时直接 `compdef` 注册；否则 vm.zsh 会把自身目录加入 `fpath`，其中带 `#compdef` 头的 `_vm` 文件由之后的 `compinit` 扫描注册。
@@ -83,6 +84,31 @@ zsh 补全（子命令 / VM 短名 / 快照名）对两种加载顺序都能注�
 | `NO_COLOR` | 未设置 | 设置后（任意非空值）强制关闭彩色输出 |
 
 颜色输出按实际 stdout 判定：管道 / 重定向 / 命令替换中自动关闭，无需显式设置。
+
+## 故障排查
+
+**「短名 X 对应不止一台虚拟机」**
+两台不同的物理 VM 映射到了同一短名（常见于不同目录下的同名 bundle，或清单与磁盘同名）。此时该短名的一切状态变更命令都会被拒绝——这是有意的，绝不猜测你想操作哪一台。解决：`vm vms` 会在冲突短名下列出保留路径与全部冲突路径（`vm doctor` 同样列出）；把其中一个 bundle 重命名，或在 Fusion 里移除清单中的陈旧条目，然后 `vm scan`。
+
+**新建/删除的 VM 没出现或没消失**
+扫描是手动模型：source 时扫一次，之后只读缓存，任何变化都需要 `vm scan` 刷新。注意 `vm status` 的「运行中」判定每次实时调 `vmrun list`，不受缓存影响；但缓存里的路径若已失效，删除命令会以「已不存在」拒绝，先 `vm scan` 即可。
+
+**「无法查询运行状态（vmrun list 失败）」**
+通常是 Fusion 未启动。状态查询失败会显式报错并透传退出码，绝不会伪装成「全部未运行」。启动 Fusion 后重试。
+
+**「vmrun 不可用」**
+默认从 `/Applications/VMware Fusion.app` 解析 `vmrun` 的绝对路径。Fusion 装在别处或使用其他构建时，用 `VMRUN_BIN=/绝对路径/vmrun` 显式指定；`vm doctor` 显示的就是实际会执行的路径。
+
+**VMware Tools 未安装时哪些命令受影响**
+- `vm ip`：立即失败；加 `-w` 会阻塞等待 Tools 就绪
+- `vm down` / `vm reset`（soft）：失败，确认无未保存数据后可改 `vm kill`（hard，不需要 Tools）
+- `vm status` 的 Tools 列：显示 `unknown`
+- 电源、快照、克隆、删除不依赖 Tools
+
+**删除 VM_DIR 之外的 VM**
+清单里的 VM 可以位于默认目录之外（inventory-only）。这类 VM 交互式删除需要额外输入 `yes` 二次确认；自动化还必须同时加 `--allow-external`——单靠 `--yes` 永远不会静默删除外部 VM。
+
+**报障**：附上 `vm version` 与 `vm doctor` 的完整输出。
 
 ## 测试
 

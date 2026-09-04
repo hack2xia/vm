@@ -1,5 +1,14 @@
 # Changelog
 
+## [未发布]
+
+### 新增
+- `vm version`：显示版本，stdout 纯净可捕获，配合 `vm doctor` 输出构成报障现场信息；`vm doctor` 顶部增加版本行。
+
+### 变更
+- CI 加固：声明 `permissions: contents: read`（最小权限）、job `timeout-minutes`、`concurrency` 取消同分支旧运行；语法检查覆盖 `_vm` 与 `tests/*.zsh` 全部文件；push 触发范围收敛到 `main` 与 `v*` 标签。
+- README 新增「故障排查」章节：短名冲突、清单陈旧、`vmrun list` 失败、`vmrun 不可用`（`VMRUN_BIN`）、Tools 未装影响面、外部 VM 删除风险。
+
 ## [0.1.2] - 2026-09-04
 
 安全边界版本：vmrun 依赖显式化、输出安全集中化、外部 VM 删除风险分级、测试隔离 fail-closed。

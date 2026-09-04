@@ -24,7 +24,12 @@
 # 可用环境变量覆盖：VM_DIR（默认扫描目录）、VM_INVENTORY（清单文件路径）、
 # VMRUN_BIN（vmrun 可执行文件路径，默认解析为 Fusion 绝对路径；测试注入 fake 用）。
 
-# ── 1. vmrun 解析（显式依赖，不走 PATH 优先级）──────────────────
+# ── 1. 版本 ─────────────────────────────────────────────────────
+# 与 CHANGELOG.md 保持一致；报障时 `vm version` + `vm doctor` 输出是最好的
+# 现场信息
+_VM_VERSION="0.1.2"
+
+# ── 2. vmrun 解析（显式依赖，不走 PATH 优先级）──────────────────
 # VMRUN_BIN 是唯一会执行的 vmrun。默认解析为 Fusion 的绝对路径；PATH 追加
 # 仅作为兜底（便于用户手动使用其他 VMware 工具），实际调用一律走 VMRUN_BIN。
 # 解析成绝对路径可避免：PATH 上 Homebrew/旧版本 vmrun 抢先、同名函数遮蔽
@@ -45,7 +50,7 @@ if [[ -d "$_vm_fusion_bindir" && ":$PATH:" != *":$_vm_fusion_bindir:"* ]]; then
   export PATH="$PATH:$_vm_fusion_bindir"
 fi
 
-# ── 2. 路径与状态 ───────────────────────────────────────────────
+# ── 3. 路径与状态 ───────────────────────────────────────────────
 VM_DIR="${VM_DIR:-$HOME/Virtual Machines.localized}"
 VM_INVENTORY="${VM_INVENTORY:-$HOME/Library/Application Support/VMware Fusion/vmInventory}"
 # 环境变量覆盖时可能是相对路径：扫描会把该形态直接写进缓存，cd 之后失效。
@@ -63,7 +68,7 @@ typeset -A VM_LC=()       # 小写短名 → 短名，供大小写不敏感解�
 typeset -A VM_CONFLICT=() # 短名 → 冲突路径列表（换行分隔）：同名但路径不同的多台 VM
                           # 无法区分，破坏性命令拒绝；路径列表供 vms/doctor 展示
 
-# ── 3. 扫描：仅 source 末尾与 `vm scan` 时调用 ──────────────────
+# ── 4. 扫描：仅 source 末尾与 `vm scan` 时调用 ──────────────────
 vm_scan() {
   emulate -L zsh
   local d f name invname id line key val chosen
@@ -255,7 +260,7 @@ _vm_p() {
 #   * (V) 控制字符可见化：ESC→^[、CR→^M、LF→\n，防终端注入伪造显示。
 _vm_esc() { print -rn -- "${(V)${1//\%/%%}}" }
 
-# ── 4. 辅助 ────────────────────────────────────────────────────
+# ── 5. 辅助 ────────────────────────────────────────────────────
 # 唯一的外部命令入口：所有 vmrun 调用必须经此，保证 VMRUN_BIN 一处生效，
 # 避免 PATH 优先级/同名函数导致「诊断显示 A、实际执行 B」。
 _vmrun() { "$VMRUN_BIN" -T fusion "$@"; }
@@ -398,7 +403,7 @@ _vm_status_line() {
   _vm_p -rP -- "  $m %F{cyan}${a}%f ${b} ${c} ${d} $s"
 }
 
-# ── 5. 帮助 ────────────────────────────────────────────────────
+# ── 6. 帮助 ────────────────────────────────────────────────────
 vm_help() {
   cat <<'EOF'
 vm — VMware Fusion (headless) 管理
@@ -443,10 +448,11 @@ vm — VMware Fusion (headless) 管理
 
 帮助:
   vm help              显示本帮助
+  vm version           显示版本（stdout 纯净可捕获）
 EOF
 }
 
-# ── 6. 主函数 ───────────────────────────────────────────────────
+# ── 7. 主函数 ───────────────────────────────────────────────────
 vm() {
   emulate -L zsh
   local cmd="${1:-}" reply _vm_waitflag
@@ -806,6 +812,7 @@ vm() {
       local ok=1 fver probeout proberc n
       local -a probelines
       _vm_p -P "%F{cyan}== vm doctor ==%f"
+      _vm_p -P "  版本: vm.zsh $_VM_VERSION"
       if [[ "$VMRUN_BIN" == /* && -x "$VMRUN_BIN" ]]; then
         # 显示的必须是真正会执行的路径（VMRUN_BIN），而非 $commands[vmrun]：
         # PATH 检索可能命中同名函数或另一个 vmrun，诊断与执行不一致
@@ -864,6 +871,11 @@ vm() {
       (( ok )) && _vm_p -P "%F{green}✓ 环境完整%f" || _vm_p -P "%F{red}✗ 环境存在问题，见上方 ✗ 项%f"
       return $(( 1 - ok ))
       ;;
+    version)
+      _vm_need $# 0 'version' || return 1
+      # stdout 纯净（无颜色无 trace），可被 $() 捕获用于报障模板
+      print -rn -- "vm.zsh $_VM_VERSION"
+      ;;
     *)
       _vm_p -P "%F{red}✗ 未知子命令: $(_vm_esc "$cmd")%f" >&2
       vm_help >&2
@@ -872,7 +884,7 @@ vm() {
   esac
 }
 
-# ── 7. zsh 补全 ────────────────────────────────────────────────
+# ── 8. zsh 补全 ────────────────────────────────────────────────
 _vm_comp() {
   local state
   local -a vms
@@ -900,6 +912,7 @@ _vm_comp() {
         'vms:列出已发现的 VM'
         'scan:重新扫描'
         'doctor:环境体检（只读诊断）'
+        'version:显示版本'
         'help:显示帮助'
       )
       _describe -t vm-cmds 'vm 子命令' cmds
@@ -963,5 +976,5 @@ _vm_compdir="${_vm_compfile:A:h}" # 规范化（消解 .. 与符号链接）后�
 (( $+functions[compdef] )) && compdef _vm_comp vm
 (( ${fpath[(Ie)$_vm_compdir]} )) || fpath=("$_vm_compdir" "$fpath[@]")
 
-# ── 8. source 时初始化扫描一次 ─────────────────────────────────
+# ── 9. source 时初始化扫描一次 ─────────────────────────────────
 vm_scan

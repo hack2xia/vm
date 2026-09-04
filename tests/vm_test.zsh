@@ -583,6 +583,14 @@ chmod +x "$T/countbin/vmrun" || die countbin-chmod
 out="$(VMRUN_BIN="$T/countbin/vmrun" VM_DIR="$T/no-such-dir" VM_INVENTORY="$T/no-inv" zsh -c 'source "$1" 2>/dev/null; vm doctor' _ "$VM_ZSH" 2>&1)"
 chk "doctor 运行台数解析（行内容而非行号）" "当前运行 3 台"
 
+# 8d. vm version：stdout 纯净（无颜色无 trace）；多余参数拒绝；doctor 带版本行
+out="$(vm version)"
+eq "vm version 输出" "vm.zsh $_VM_VERSION" "$out"
+out="$(vm version typo 2>&1)"; rc=$?
+eq "vm version 多余参数 rc=1" "1" "$rc"
+out="$(vm doctor 2>&1)"
+chk "doctor 显示版本" "版本: vm.zsh $_VM_VERSION"
+
 # ── 回归：--allow-external / 控制字符可见化 / 回显 quoting ─────
 _vm_p -P "%F{cyan}== allow-external 与输出安全 =="
 
