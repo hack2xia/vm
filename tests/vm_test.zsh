@@ -13,16 +13,18 @@ trap 'rm -rf "$T"' EXIT
 
 # ── 夹具 ─────────────────────────────────────────────────────────
 # vmlist3/vmlist4 是两台不同路径但 bundle 同名（Debian）的 VM，覆盖短名冲突。
+# 夹具创建失败立即终止：绝不退回 PATH 继续找真实 vmrun，保证不碰真实虚拟机。
+die() { print -u2 -- "夹具创建失败: $1"; exit 1; }
 mkdir -p "$T/vms/Kali Linux.vmwarevm" "$T/vms/WinSer2019.vmwarevm" \
          "$T/vms/50%off.vmwarevm" "$T/vms/中文虚拟机.vmwarevm" \
          "$T/other/Debian.vmwarevm" \
-         "$T/other2/Debian.vmwarevm" "$T/emptydir"
+         "$T/other2/Debian.vmwarevm" "$T/emptydir" || die mkdir
 touch "$T/vms/Kali Linux.vmwarevm/Kali Linux.vmx" \
       "$T/vms/WinSer2019.vmwarevm/Win.vmx" \
       "$T/vms/50%off.vmwarevm/50%off.vmx" \
       "$T/vms/中文虚拟机.vmwarevm/中文虚拟机.vmx" \
       "$T/other/Debian.vmwarevm/Debian.vmx" \
-      "$T/other2/Debian.vmwarevm/Debian.vmx"
+      "$T/other2/Debian.vmwarevm/Debian.vmx" || die touch
 
 cat > "$T/inventory" <<INV
 .encoding = "UTF-8"
@@ -70,11 +72,12 @@ case "\$sub" in
   stop)
     if [[ -n "\$FAKE_STOP_FAIL" ]]; then echo "Error: VMware Tools are not running in this VM"; exit 1; fi
     echo "fake vmrun: stop" ;;
+  start|suspend|pause|unpause|reset) echo "fake vmrun: \$sub" ;;
   deleteVM) rm -f "\$4"; echo "fake vmrun: deleteVM" ;;
   clone)
     if [[ -n "\$FAKE_CLONE_FAIL" ]]; then echo "Error: clone failed"; exit 1; fi
     : > "\$5"; echo "fake vmrun: clone" ;;
-  *) echo "fake vmrun: \$sub" ;;
+  *) print -u2 "fake vmrun: 未实现的子命令 \$sub"; exit 1 ;;
 esac
 FAKE
   chmod +x "$T/vmrun"
@@ -300,7 +303,7 @@ ok "clone argv 契约（目标路径 + -cloneName）"
 out="$(vm clone 'kali linux' newvm full 2>&1)"; rc=$?
 chk "目标已存在时拒绝" "目标已存在"
 eq "目标已存在 rc=1" "1" "$rc"
-out="$(vm clone 'Debian' x linked 2>&1)"; rc=$?
+out="$(vm clone 'WinSer2019' x linked 2>&1)"; rc=$?
 chk "linked 无快照时拒绝并指引" "至少有一个快照"
 eq "linked 无快照 rc=1" "1" "$rc"
 : > "$T/calls.log"
@@ -408,6 +411,92 @@ out="$(vm vms 2>&1)"
 [[ "$out" != *50%off* ]]
 ok "删除后重新扫描，VM 已不在列表"
 
+# ── 回归：冲突覆盖面 / 路径身份 / 相对路径 / % 名称 ─────────────
+_vm_p -P "%F{cyan}== 冲突覆盖与路径身份 =="
+
+# 9. 冲突短名：一切状态变更命令一律拒绝（原 bug：up/suspend/pause/unpause/
+#    snap create/clone 源不在保护范围内，会把操作落在无法区分的那台上）
+for c in up suspend pause unpause; do
+  out="$(vm $c Debian 2>&1)"; rc=$?
+  eq "冲突短名拒绝 $c" "1" "$rc"
+done
+before=$(wc -l < "$T/calls.log")
+vm up Debian >/dev/null 2>&1
+after=$(wc -l < "$T/calls.log")
+eq "冲突拒绝 up 时不调用 vmrun" "$before" "$after"
+out="$(vm snap create Debian s1 2>&1)"; rc=$?
+eq "冲突短名拒绝 snap create" "1" "$rc"
+out="$(vm clone Debian newx full 2>&1)"; rc=$?
+eq "冲突短名拒绝作为 clone 源" "1" "$rc"
+
+# 10. 默认目录内大小写同名 → 冲突（需大小写敏感卷才能仿真，否则跳过）
+mkdir -p "$T/casev/Foo.vmwarevm"
+: > "$T/casev/Foo.vmwarevm/Foo.vmx"
+if mkdir "$T/casev/foo.vmwarevm" 2>/dev/null && [[ ! "$T/casev/Foo.vmwarevm" -ef "$T/casev/foo.vmwarevm" ]]; then
+  : > "$T/casev/foo.vmwarevm/foo.vmx"
+  out="$(VM_DIR="$T/casev" VM_INVENTORY="$T/no-inv" zsh -c 'source "$1" 2>/dev/null; print -rn -- "${#VM_CONFLICT}"' _ "$VM_ZSH" 2>/dev/null)"
+  eq "默认目录内大小写同名进入冲突状态" "1" "$out"
+  out="$(VM_DIR="$T/casev" VM_INVENTORY="$T/no-inv" zsh -c 'source "$1" 2>/dev/null; vm up Foo' _ "$VM_ZSH" 2>/dev/null)"; rc=$?
+  eq "大小写同名短名拒绝 up" "1" "$rc"
+  rm -rf "$T/casev"
+else
+  _vm_p -P "  %F{yellow}SKIP: 当前卷大小写不敏感，无法仿真大小写同名%f"
+fi
+
+# 11. 路径身份：清单存符号链接路径、vmrun list 回显真实路径 → 运行判定
+#     必须仍成立（原 bug：小写字符串比对误判「未运行」，delete 运行保护被绕过）
+mkdir -p "$T/real/Linked.vmwarevm" "$T/linkdir" "$T/symbin"
+: > "$T/real/Linked.vmwarevm/Linked.vmx"
+ln -s "$T/real/Linked.vmwarevm" "$T/linkdir/Linked.vmwarevm"
+cat > "$T/syminv" <<INV
+vmlist1.config = "$T/linkdir/Linked.vmwarevm/Linked.vmx"
+vmlist1.DisplayName = "Linked"
+vmlist1.State = "normal"
+INV
+REAL_VMX="$T/real/Linked.vmwarevm/Linked.vmx"
+export REAL_VMX
+cat > "$T/symbin/vmrun" <<'FAKE'
+#!/bin/zsh
+case "$3" in
+  list) echo "Total running VMs: 1"; echo "$REAL_VMX" ;;
+  checkToolsState) echo "installed" ;;
+  deleteVM) print -u2 "BUG-DELETE-RAN"; exit 42 ;;
+  *) echo "fake: $3" ;;
+esac
+FAKE
+chmod +x "$T/symbin/vmrun"
+out="$(PATH="$T/symbin:$PATH" VM_DIR="$T/real" VM_INVENTORY="$T/syminv" zsh -c 'source "$1" 2>/dev/null; vm status Linked' _ "$VM_ZSH" 2>&1)"
+chk "符号链接路径的运行中 VM 仍被识别为运行中" "运行中"
+out="$(PATH="$T/symbin:$PATH" VM_DIR="$T/real" VM_INVENTORY="$T/syminv" zsh -c 'source "$1" 2>/dev/null; vm delete Linked --yes' _ "$VM_ZSH" 2>&1)"; rc=$?
+eq "符号链接路径下运行保护拦截 delete" "1" "$rc"
+[[ "$out" != *BUG-DELETE-RAN* ]]
+ok "deleteVM 未被执行"
+
+# 12. 相对 VM_DIR：source 时规范化为绝对路径，cd 后缓存不失效
+mkdir -p "$T/relv/Sub/Alpha.vmwarevm"
+: > "$T/relv/Sub/Alpha.vmwarevm/Alpha.vmx"
+out="$(cd "$T/relv" && VM_DIR="Sub" VM_INVENTORY="$T/no-inv" zsh -c 'source "$1" 2>/dev/null; cd /; print -rn -- "${VM_VMX[Alpha]}"' _ "$VM_ZSH" 2>/dev/null)"
+eq "相对 VM_DIR 规范化为绝对路径（cd 后仍有效）" "$T/relv/Sub/Alpha.vmwarevm/Alpha.vmx" "$out"
+
+# 13. 名字含 %F{…} 等 prompt 序列：无色输出原样保留
+#     （原 bug：%% 转义与颜色剥除相互作用，名字被 print -P 吃得只剩 oo）
+mkdir -p "$T/pctdir/%F{red}foo.vmwarevm"
+: > "$T/pctdir/%F{red}foo.vmwarevm/%F{red}foo.vmx"
+out="$(VM_DIR="$T/pctdir" VM_INVENTORY="$T/no-inv" zsh -c 'source "$1" 2>/dev/null; vm vms' _ "$VM_ZSH" 2>&1)"
+chk "名字含 %F{...} 时无色输出原样保留" "%F{red}foo"
+
+# 14. clone 新名禁止 - 开头；delete 支持 -- 透传，磁盘上已有的 - 名 VM 仍可管理
+out="$(vm clone 'kali linux' --foo full 2>&1)"; rc=$?
+eq "clone 拒绝以 - 开头的新名" "1" "$rc"
+mkdir -p "$T/vms/--weird.vmwarevm"
+: > "$T/vms/--weird.vmwarevm/--weird.vmx"
+vm scan >/dev/null 2>&1
+out="$(vm delete -- --weird </dev/null 2>&1)"; rc=$?
+eq "delete -- 透传：--weird 被视为名字并因缺 --yes 拒绝" "1" "$rc"
+chk "走到 --yes 检查而非未知选项" "非交互环境请显式加 --yes"
+rm -rf "$T/vms/--weird.vmwarevm"
+vm scan >/dev/null 2>&1
+
 # ── 回归：多余参数拒绝 + vmrun 缺失 + 非终端无色 ───────────────
 _vm_p -P "%F{cyan}== 参数契约与颜色 ==%f"
 
@@ -440,6 +529,16 @@ chk "缺失时提示查询失败" "无法查询运行状态"
 out="$(vm vms 2>&1)"
 [[ "$out" != *$'\e['* ]]
 ok "非终端输出不含 ANSI 颜色转义"
+
+# 8b. vm doctor：完整环境 rc=0；vmrun 缺失时 rc=1 并显式指出问题
+out="$(vm doctor 2>&1)"; rc=$?
+eq "vm doctor 完整环境 rc=0" "0" "$rc"
+chk "doctor 报告 vmrun 位置" "vmrun"
+chk "doctor 真正探活（vmrun list）" "探活正常"
+chk "doctor 提示冲突短名" "冲突短名"
+out="$(zsh -c 'source "$1" >/dev/null 2>&1; PATH=/usr/bin:/bin; vm doctor' _ "$VM_ZSH" 2>&1)"; rc=$?
+eq "vmrun 缺失时 doctor rc=1" "1" "$rc"
+chk "doctor 指出 vmrun 不可用" "vmrun 不可用"
 
 # ── 补全注册时序 ─────────────────────────────────────────────────
 _vm_p -P "%F{cyan}== 补全注册时序 ==%f"
