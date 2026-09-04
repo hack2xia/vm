@@ -539,6 +539,18 @@ chk "doctor 提示冲突短名" "冲突短名"
 out="$(zsh -c 'source "$1" >/dev/null 2>&1; PATH=/usr/bin:/bin; vm doctor' _ "$VM_ZSH" 2>&1)"; rc=$?
 eq "vmrun 缺失时 doctor rc=1" "1" "$rc"
 chk "doctor 指出 vmrun 不可用" "vmrun 不可用"
+# 8c. doctor 的运行台数取自行内容而非行号（原 bug：(I) 下标取到表头行号 1，
+#     显示的台数恒为 1；沙盒主夹具恰为 1 台测不出，用 3 台的专用探针区分）
+mkdir -p "$T/countbin"
+cat > "$T/countbin/vmrun" <<FAKE2
+#!/bin/zsh
+case "\$3" in
+  list) echo "Total running VMs: 3"; echo one; echo two; echo three ;;
+esac
+FAKE2
+chmod +x "$T/countbin/vmrun"
+out="$(PATH="$T/countbin:$PATH" VM_DIR="$T/no-such-dir" VM_INVENTORY="$T/no-inv" zsh -c 'source "$1" 2>/dev/null; vm doctor' _ "$VM_ZSH" 2>&1)"
+chk "doctor 运行台数解析（行内容而非行号）" "当前运行 3 台"
 
 # ── 补全注册时序 ─────────────────────────────────────────────────
 _vm_p -P "%F{cyan}== 补全注册时序 ==%f"

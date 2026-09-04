@@ -742,6 +742,7 @@ vm() {
       # ✗ 计入失败（退出码 1），! 仅提示（环境仍可用）。
       _vm_need $# 0 'doctor' || return 1
       local ok=1 fver probeout proberc n
+      local -a probelines
       _vm_p -P "%F{cyan}== vm doctor ==%f"
       if (( $+commands[vmrun] )); then
         _vm_p -P "%F{green}✓ vmrun%f ${commands[vmrun]}"
@@ -773,8 +774,10 @@ vm() {
       # 探活：vmrun list 真正跑一次，这才是「环境完整」的硬证据
       probeout="$(vmrun -T fusion list 2>&1)"; proberc=$?
       if (( proberc == 0 )); then
-        n="${${(f)probeout}[(I)Total running VMs:*]}"
-        n="${n//[!0-9]/}"
+        # 两个坑：(r) 才取匹配元素（(I) 取行号，表头恒为 1）；且下标必须
+        # 落在中间数组上——嵌套 ${${(f)x}[(r)…]} 会退化成标量下标返回首字符
+        probelines=("${(f)probeout}")
+        n="${${probelines[(r)Total running VMs:*]}//[!0-9]/}"
         _vm_p -P "%F{green}✓ vmrun list%f 探活正常，当前运行 ${n:-0} 台"
       else
         ok=0
