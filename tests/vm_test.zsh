@@ -8,12 +8,21 @@
 emulate -L zsh
 
 VM_ZSH="${0:A:h}/../vm.zsh"
-T="${0:A:h}/.sandbox.$$"
+# mktemp 随机沙盒：原 .sandbox.$$ 路径可预测，存在被预先占位/符号链接攻击的可能。
+# :A 规范化（TMPDIR 可能带尾斜杠；macOS 的 /var 是 /private/var 符号链接，
+# vm.zsh 里 VM_DIR 等会规范化为 /private 形态，fake 的沙盒守卫必须同形态比对）
+T="$(mktemp -d "${TMPDIR:-/tmp}/vm.zsh-test.XXXXXXXX")" || { print -u2 -- "无法创建沙盒目录"; exit 1; }
+T="${T:A}"
+# 清理注册到 EXIT/INT/TERM/HUP：测试被中断也绝不把残留在共享 /tmp
 trap 'rm -rf "$T"' EXIT
+trap 'rm -rf "$T"; trap - EXIT; kill -s INT  $$' INT
+trap 'rm -rf "$T"; trap - EXIT; kill -s TERM $$' TERM
+trap 'rm -rf "$T"; trap - EXIT; kill -s HUP  $$' HUP
 
 # ── 夹具 ─────────────────────────────────────────────────────────
 # vmlist3/vmlist4 是两台不同路径但 bundle 同名（Debian）的 VM，覆盖短名冲突。
 # 夹具创建失败立即终止：绝不退回 PATH 继续找真实 vmrun，保证不碰真实虚拟机。
+# （双保险：fake vmrun 经 VMRUN_BIN 显式注入，vm.zsh 绝不回退 PATH 查找。）
 die() { print -u2 -- "夹具创建失败: $1"; exit 1; }
 mkdir -p "$T/vms/Kali Linux.vmwarevm" "$T/vms/WinSer2019.vmwarevm" \
          "$T/vms/50%off.vmwarevm" "$T/vms/中文虚拟机.vmwarevm" \
@@ -26,7 +35,7 @@ touch "$T/vms/Kali Linux.vmwarevm/Kali Linux.vmx" \
       "$T/other/Debian.vmwarevm/Debian.vmx" \
       "$T/other2/Debian.vmwarevm/Debian.vmx" || die touch
 
-cat > "$T/inventory" <<INV
+cat <<INV > "$T/inventory" || die inventory
 .encoding = "UTF-8"
 vmlist1.config = "$T/vms/Kali Linux.vmwarevm/Kali Linux.vmx"
 vmlist1.DisplayName = "Kali Linux 2024"
@@ -48,7 +57,7 @@ INV
 write_vmrun() {
   # 环境开关（需 export）：FAKE_IP / FAKE_IP_ERR / FAKE_SNAP_FAIL / FAKE_STOP_FAIL
   # 每次调用把 argv 逐参数记进 calls.log（| 分隔）供契约断言
-  cat > "$T/vmrun" <<FAKE
+  cat <<FAKE > "$T/vmrun" || die vmrun
 #!/bin/zsh
 { print -rn -- "vmrun"; local _a; for _a in "\$@"; do print -rn -- "|\$_a"; done; print; } >> "$T/calls.log"
 sub="\$3"
@@ -56,7 +65,11 @@ case "\$sub" in
   list)
     if [[ -n "\$FAKE_LIST_FAIL" ]]; then echo "Error: unable to connect to the VMware server"; exit 1; fi
     echo "Total running VMs: 1"
-    echo "$T/vms/Kali Linux.vmwarevm/Kali Linux.vmx" ;;
+    echo "$T/vms/Kali Linux.vmwarevm/Kali Linux.vmx"
+    # 运行清单钩子：$T/extra-running 存在时把其内容追加为运行路径，
+    # 供「交互确认期间 VM 被启动」场景使用（zpty 测试在确认中途写入该文件）。
+    # 必须用 if/fi：[[ -f ]] && cat 短路会让 fake 在钩子缺失时退出码变 1
+    if [[ -f "$T/extra-running" ]]; then cat "$T/extra-running"; fi ;;
   checkToolsState) echo "installed" ;;
   getGuestIPAddress)
     if [[ -n "\$FAKE_IP_ERR" ]]; then
@@ -73,18 +86,29 @@ case "\$sub" in
     if [[ -n "\$FAKE_STOP_FAIL" ]]; then echo "Error: VMware Tools are not running in this VM"; exit 1; fi
     echo "fake vmrun: stop" ;;
   start|suspend|pause|unpause|reset) echo "fake vmrun: \$sub" ;;
-  deleteVM) rm -f "\$4"; echo "fake vmrun: deleteVM" ;;
+  deleteVM)
+    # 沙盒范围检查 fail-closed：任何指向沙盒外的删除路径一律拒绝
+    case "\$4" in
+      "$T"/*) rm -f "\$4"; echo "fake vmrun: deleteVM" ;;
+      *) print -u2 "fake vmrun: 拒绝沙盒外删除路径: \$4"; exit 99 ;;
+    esac ;;
   clone)
     if [[ -n "\$FAKE_CLONE_FAIL" ]]; then echo "Error: clone failed"; exit 1; fi
-    : > "\$5"; echo "fake vmrun: clone" ;;
+    case "\$5" in
+      "$T"/*) : > "\$5"; echo "fake vmrun: clone" ;;
+      *) print -u2 "fake vmrun: 拒绝沙盒外写入路径: \$5"; exit 99 ;;
+    esac ;;
   *) print -u2 "fake vmrun: 未实现的子命令 \$sub"; exit 1 ;;
 esac
 FAKE
-  chmod +x "$T/vmrun"
+  chmod +x "$T/vmrun" || die chmod
 }
 write_vmrun
 
-export PATH="$T:$PATH" VM_DIR="$T/vms" VM_INVENTORY="$T/inventory"
+# 显式注入 fake（不依赖 PATH 优先级）：vm.zsh 的所有 vmrun 调用都走
+# VMRUN_BIN，即使 PATH 上存在同名函数或其他 vmrun 也只执行 $T/vmrun。
+[[ -x "$T/vmrun" ]] || die "fake vmrun 不可执行"
+export VMRUN_BIN="$T/vmrun" VM_DIR="$T/vms" VM_INVENTORY="$T/inventory"
 source "$VM_ZSH"
 
 fail=0
@@ -128,7 +152,7 @@ out="$(vm vms 2>/dev/null)"
 prefws=()
 same=1
 for l in ${(f)out}; do
-  [[ "$l" == *"$T/"* ]] || continue
+  [[ "$l" == *"$T/"* && "$l" != *冲突路径* ]] || continue
   pref="${l%%$T/*}"
   prefws+=($(_vm_dispwidth "$pref"))
 done
@@ -196,7 +220,7 @@ _vm_p -P "%F{cyan}== 快照 ==%f"
 out="$(vm snap list 'kali linux' 2>&1)"
 chk "listSnapshots 输出" "after-setup"
 # .vmsd 放在 .vmx 旁（${vmx:r}.vmsd = Kali Linux.vmsd）
-cat > "$T/vms/Kali Linux.vmwarevm/Kali Linux.vmsd" <<'VMSD'
+cat <<'VMSD' > "$T/vms/Kali Linux.vmwarevm/Kali Linux.vmsd" || die vmsd
 snapshot0.displayName = "base"
 snapshot0.description = "初始状态"
 snapshot1.displayName = "after-setup"
@@ -243,7 +267,7 @@ chk "恢复后仍 5 台" "共发现 5 台"
 # ── 失效清单路径 ─────────────────────────────────────────────────
 _vm_p -P "%F{cyan}== 失效清单路径 ==%f"
 # bundle 名与磁盘一致（Kali Linux）但 .vmx 不存在 → 不能覆盖磁盘扫描结果
-cat > "$T/inventory" <<INV
+cat <<INV > "$T/inventory" || die inventory
 .encoding = "UTF-8"
 vmlist1.config = "$T/vms/Kali Linux.vmwarevm/GONE.vmx"
 vmlist1.DisplayName = "Kali Linux 2024"
@@ -329,7 +353,7 @@ chk "显示查询失败而非未运行" "无法查询运行状态"
 # 2. inventory-only 的失效路径不得进入管理列表
 #    （注意：vm_scan 会改 VM_VMX/VM_CONFLICT 等全局数组，必须在主 shell 里跑——
 #     包在 $() 里只改子 shell 副本，后续断言读不到。这里先跑 scan 再断言）
-cat > "$T/inventory" <<INV
+cat <<INV > "$T/inventory" || die inventory
 .encoding = "UTF-8"
 vmlist1.config = "$T/ghost/Phantom.vmwarevm/Phantom.vmx"
 vmlist1.DisplayName = "Phantom"
@@ -346,7 +370,7 @@ ok "失效清单条目不进入管理列表"
 #    （原 bug：磁盘结果被清单首条静默覆盖，破坏性命令可能操作错 VM）
 mkdir -p "$T/vms/Debian.vmwarevm"
 touch "$T/vms/Debian.vmwarevm/Debian.vmx"
-cat > "$T/inventory" <<INV
+cat <<INV > "$T/inventory" || die inventory
 .encoding = "UTF-8"
 vmlist1.config = "$T/other2/Debian.vmwarevm/Debian.vmx"
 vmlist1.DisplayName = "Debian mirror"
@@ -360,6 +384,12 @@ chk "保留磁盘扫描的路径，不再静默覆盖" "$T/vms/Debian.vmwarevm/D
 out="$(vm kill Debian 2>&1)"; rc=$?
 eq "冲突短名拒绝 kill" "1" "$rc"
 chk "kill 拒绝有提示" "拒绝执行"
+chk "拒绝时显示保留路径" "保留: "
+chk "拒绝时显示被隐藏的冲突路径" "$T/other2/Debian.vmwarevm/Debian.vmx"
+chk "拒绝时给出解决指引" "解决："
+out="$(vm vms 2>&1)"
+chk "vms 标记冲突并显示冲突路径" "冲突路径"
+chk "vms 显示全部冲突集合" "$T/other2/Debian.vmwarevm/Debian.vmx"
 out="$(vm snap delete Debian base 2>&1)"; rc=$?
 eq "冲突短名拒绝 snap delete" "1" "$rc"
 before=$(wc -l < "$T/calls.log")
@@ -448,14 +478,14 @@ fi
 mkdir -p "$T/real/Linked.vmwarevm" "$T/linkdir" "$T/symbin"
 : > "$T/real/Linked.vmwarevm/Linked.vmx"
 ln -s "$T/real/Linked.vmwarevm" "$T/linkdir/Linked.vmwarevm"
-cat > "$T/syminv" <<INV
+cat <<INV > "$T/syminv" || die syminv
 vmlist1.config = "$T/linkdir/Linked.vmwarevm/Linked.vmx"
 vmlist1.DisplayName = "Linked"
 vmlist1.State = "normal"
 INV
 REAL_VMX="$T/real/Linked.vmwarevm/Linked.vmx"
 export REAL_VMX
-cat > "$T/symbin/vmrun" <<'FAKE'
+cat <<'FAKE' > "$T/symbin/vmrun" || die symbin-vmrun
 #!/bin/zsh
 case "$3" in
   list) echo "Total running VMs: 1"; echo "$REAL_VMX" ;;
@@ -464,10 +494,10 @@ case "$3" in
   *) echo "fake: $3" ;;
 esac
 FAKE
-chmod +x "$T/symbin/vmrun"
-out="$(PATH="$T/symbin:$PATH" VM_DIR="$T/real" VM_INVENTORY="$T/syminv" zsh -c 'source "$1" 2>/dev/null; vm status Linked' _ "$VM_ZSH" 2>&1)"
+chmod +x "$T/symbin/vmrun" || die symbin-chmod
+out="$(VMRUN_BIN="$T/symbin/vmrun" VM_DIR="$T/real" VM_INVENTORY="$T/syminv" zsh -c 'source "$1" 2>/dev/null; vm status Linked' _ "$VM_ZSH" 2>&1)"
 chk "符号链接路径的运行中 VM 仍被识别为运行中" "运行中"
-out="$(PATH="$T/symbin:$PATH" VM_DIR="$T/real" VM_INVENTORY="$T/syminv" zsh -c 'source "$1" 2>/dev/null; vm delete Linked --yes' _ "$VM_ZSH" 2>&1)"; rc=$?
+out="$(VMRUN_BIN="$T/symbin/vmrun" VM_DIR="$T/real" VM_INVENTORY="$T/syminv" zsh -c 'source "$1" 2>/dev/null; vm delete Linked --yes' _ "$VM_ZSH" 2>&1)"; rc=$?
 eq "符号链接路径下运行保护拦截 delete" "1" "$rc"
 [[ "$out" != *BUG-DELETE-RAN* ]]
 ok "deleteVM 未被执行"
@@ -519,9 +549,9 @@ eq "vm vms 多余参数 rc=1" "1" "$rc"
 out="$(vm scan typo 2>&1)"; rc=$?
 eq "vm scan 多余参数 rc=1" "1" "$rc"
 
-# 7. vmrun 不可用（命令缺失/失败）：status 必须显式失败，不得当「全部未运行」。
-#    用函数遮蔽 vmrun 模拟「找不到命令」，避免本机装了真实 Fusion 而测不到。
-out="$(zsh -c 'vmrun() { print -u2 "vmrun: command not found"; return 127; }; source "$1" >/dev/null 2>&1; vm status "kali linux"' _ "$VM_ZSH" 2>&1)"; rc=$?
+# 7. vmrun 不可用（VMRUN_BIN 指向不存在的文件）：status 必须显式失败，
+#    不得当「全部未运行」，且绝不回退 PATH 去找真实 vmrun。
+out="$(VMRUN_BIN="$T/nosuchdir/vmrun" zsh -c 'source "$1" >/dev/null 2>&1; vm status "kali linux"' _ "$VM_ZSH" 2>&1)"; rc=$?
 eq "vmrun 缺失时 status rc=127" "127" "$rc"
 chk "缺失时提示查询失败" "无法查询运行状态"
 
@@ -536,21 +566,180 @@ eq "vm doctor 完整环境 rc=0" "0" "$rc"
 chk "doctor 报告 vmrun 位置" "vmrun"
 chk "doctor 真正探活（vmrun list）" "探活正常"
 chk "doctor 提示冲突短名" "冲突短名"
-out="$(zsh -c 'source "$1" >/dev/null 2>&1; PATH=/usr/bin:/bin; vm doctor' _ "$VM_ZSH" 2>&1)"; rc=$?
+chk "doctor 列出全部冲突路径" "冲突 $T/other2/Debian.vmwarevm/Debian.vmx"
+out="$(VMRUN_BIN="$T/nosuchdir/vmrun" zsh -c 'source "$1" >/dev/null 2>&1; vm doctor' _ "$VM_ZSH" 2>&1)"; rc=$?
 eq "vmrun 缺失时 doctor rc=1" "1" "$rc"
 chk "doctor 指出 vmrun 不可用" "vmrun 不可用"
 # 8c. doctor 的运行台数取自行内容而非行号（原 bug：(I) 下标取到表头行号 1，
 #     显示的台数恒为 1；沙盒主夹具恰为 1 台测不出，用 3 台的专用探针区分）
 mkdir -p "$T/countbin"
-cat > "$T/countbin/vmrun" <<FAKE2
+cat <<FAKE2 > "$T/countbin/vmrun" || die countbin-vmrun
 #!/bin/zsh
 case "\$3" in
   list) echo "Total running VMs: 3"; echo one; echo two; echo three ;;
 esac
 FAKE2
-chmod +x "$T/countbin/vmrun"
-out="$(PATH="$T/countbin:$PATH" VM_DIR="$T/no-such-dir" VM_INVENTORY="$T/no-inv" zsh -c 'source "$1" 2>/dev/null; vm doctor' _ "$VM_ZSH" 2>&1)"
+chmod +x "$T/countbin/vmrun" || die countbin-chmod
+out="$(VMRUN_BIN="$T/countbin/vmrun" VM_DIR="$T/no-such-dir" VM_INVENTORY="$T/no-inv" zsh -c 'source "$1" 2>/dev/null; vm doctor' _ "$VM_ZSH" 2>&1)"
 chk "doctor 运行台数解析（行内容而非行号）" "当前运行 3 台"
+
+# ── 回归：--allow-external / 控制字符可见化 / 回显 quoting ─────
+_vm_p -P "%F{cyan}== allow-external 与输出安全 =="
+
+# 15. 外部 VM（VM_DIR 之外的 inventory 路径）：--yes 不足以静默删除，
+#     必须显式 --allow-external——否则自动化里一条 --yes 就能删掉清单指向的
+#     任意外部 VM
+mkdir -p "$T/outside/Ext.vmwarevm"
+: > "$T/outside/Ext.vmwarevm/Ext.vmx" || die touch
+cat <<INV > "$T/inventory" || die inventory
+.encoding = "UTF-8"
+vmlist1.config = "$T/outside/Ext.vmwarevm/Ext.vmx"
+vmlist1.DisplayName = "External VM"
+vmlist1.State = ""
+INV
+vm scan >/dev/null 2>&1
+before=$(wc -l < "$T/calls.log")
+out="$(vm delete Ext --yes 2>&1)"; rc=$?
+eq "外部 VM 仅 --yes 拒绝删除" "1" "$rc"
+chk "提示需 --allow-external" "--allow-external"
+after=$(wc -l < "$T/calls.log")
+eq "外部 VM 拒绝时不调用 vmrun" "$before" "$after"
+out="$(vm delete Ext --yes --allow-external 2>&1)"; rc=$?
+eq "外部 VM --yes --allow-external 成功删除" "0" "$rc"
+[[ ! -e "$T/outside/Ext.vmwarevm/Ext.vmx" ]]
+ok "fake deleteVM 已删除外部 .vmx"
+# 交互模式下外部 VM 的二次确认保持不变（无 --yes 时仍要求输入 yes）
+: > "$T/outside/Ext.vmwarevm/Ext.vmx" || die touch
+cat <<INV > "$T/inventory" || die inventory
+.encoding = "UTF-8"
+vmlist1.config = "$T/outside/Ext.vmwarevm/Ext.vmx"
+vmlist1.DisplayName = "External VM"
+vmlist1.State = ""
+INV
+vm scan >/dev/null 2>&1
+out="$(vm delete Ext --allow-external </dev/null 2>&1)"; rc=$?
+eq "交互无 --yes 时仍拒绝（--allow-external 不豁免名称确认）" "1" "$rc"
+chk "提示加 --yes" "--yes"
+: > "$T/inventory"
+vm scan >/dev/null 2>&1
+
+# 16. 名字含控制字符（ESC）：输出统一可见化（^[），终端注入被拆除
+mkdir -p "$T/vms/esc"$'\x1b'"x.vmwarevm"
+: > "$T/vms/esc"$'\x1b'"x.vmwarevm/esc"$'\x1b'"x.vmx" || die touch
+vm scan >/dev/null 2>&1
+out="$(vm vms 2>&1)"
+[[ "$out" == *'esc^['* && "$out" != *$'\x1b'* ]]
+ok "ESC 可见化为 ^[，输出不含原始控制字节"
+rm -rf "$T/vms/esc"$'\x1b'"x.vmwarevm"
+vm scan >/dev/null 2>&1
+
+# 17. 回显按参数 quoting：含空格的路径在回显里可原样复制执行
+mkdir -p "$T/vms/sp ace.vmwarevm"
+: > "$T/vms/sp ace.vmwarevm/sp ace.vmx" || die touch
+vm scan >/dev/null 2>&1
+out="$(vm up 'sp ace' 2>&1)"
+chk "回显中含空格参数被 quoting" 'sp\ ace'
+rm -rf "$T/vms/sp ace.vmwarevm"
+vm scan >/dev/null 2>&1
+
+# ── 回归：zpty 真实交互删除 + TTY 输出 ──────────────────────────
+_vm_p -P "%F{cyan}== zpty 交互删除与 TTY 输出 =="
+if ! zmodload zsh/zpty 2>/dev/null; then
+  _vm_p -P "  %F{yellow}SKIP: zsh/zpty 不可用，跳过交互删除测试%f"
+else
+  # 交互夹具：磁盘扫描可见的普通 VM（fake list 钩子未触发时不运行）
+  mk_itty() {
+    mkdir -p "$T/vms/itvm.vmwarevm"
+    : > "$T/vms/itvm.vmwarevm/itvm.vmx" || die touch
+    vm scan >/dev/null 2>&1
+  }
+  # zpty -r 的两种读法都不可靠：不带 pattern 是非阻塞快照（竞态漏读），
+  # 带 pattern 会阻塞到匹配（永不匹配时永久挂起）。因此统一用「预写输入 +
+  # 哨兵」：全部响应在 spawn 后立即写入 pty 输入缓冲（子进程 read 时按序
+  # 消费），哨兵 __DONE__ 在 vm 命令之后无条件打印——唯一一次 pattern 读取
+  # 必然命中，测试从机制上不可能挂死。
+  # $1 = vm 命令行，$2* = 预写输入（每项一行）
+  pty_run() {
+    local cmdline="$1"; shift
+    out=""
+    zpty vt zsh -c "source \"\$1\" 2>/dev/null; $cmdline; print __DONE__" _ "$VM_ZSH"
+    local inp
+    for inp in "$@"; do
+      [[ "$inp" == $'\x04' ]] && zpty -w -n vt "$inp" || zpty -w vt "$inp"
+    done
+    zpty -r vt out '*__DONE__*' || _vm_p -P "  %F{red}FAIL: pty 未收到哨兵输出%f"
+    zpty -d vt 2>/dev/null
+  }
+
+  # 18. 正确输入短名 → 删除成功；deleteVM 确实被调用、.vmx 消失
+  mk_itty
+  before=$(wc -l < "$T/calls.log")
+  pty_run 'vm delete itvm' 'itvm'
+  chk "zpty 交互出现名称确认提示" "输入短名"
+  chk "zpty 交互正确输入短名后删除成功" "已删除"
+  [[ ! -e "$T/vms/itvm.vmwarevm/itvm.vmx" ]]
+  ok "交互删除后 .vmx 消失"
+  grep -Fq -- "|deleteVM|" "$T/calls.log"
+  ok "交互成功路径调用了 deleteVM"
+
+  # 19. 输入错误 → 取消；绝不调用 deleteVM
+  mk_itty
+  before=$(wc -l < "$T/calls.log")
+  pty_run 'vm delete itvm' 'wrong-name'
+  chk "zpty 交互输入错误时取消" "输入不匹配"
+  after=$(wc -l < "$T/calls.log")
+  eq "取消时不调用 deleteVM" "$before" "$after"
+  [[ -e "$T/vms/itvm.vmwarevm/itvm.vmx" ]]
+  ok "取消后 .vmx 仍在"
+
+  # 20. EOF（Ctrl-D）→ 按空输入处理，取消
+  mk_itty
+  pty_run 'vm delete itvm' $'\x04'
+  chk "zpty EOF 取消删除" "输入不匹配"
+
+  # 21. 外部 VM：短名确认后再输入 yes 才删除
+  mkdir -p "$T/outside/Ext.vmwarevm"
+  : > "$T/outside/Ext.vmwarevm/Ext.vmx" || die touch
+  cat <<INV > "$T/inventory" || die inventory
+.encoding = "UTF-8"
+vmlist1.config = "$T/outside/Ext.vmwarevm/Ext.vmx"
+vmlist1.DisplayName = "External VM"
+vmlist1.State = ""
+INV
+  vm scan >/dev/null 2>&1
+  pty_run 'vm delete Ext' 'Ext' 'yes'
+  chk "外部 VM 交互出现二次确认" "再输入 yes"
+  chk "外部 VM 二次确认后删除成功" "已删除"
+  [[ ! -e "$T/outside/Ext.vmwarevm/Ext.vmx" ]]
+  ok "外部 VM 交互删除后 .vmx 消失"
+
+  # 22. 删除前最后一刻复查运行状态：拦截并拒绝，deleteVM 不执行
+  #     （fake list 钩子把 itvm 加进运行清单——无论「被启动」发生在确认前
+  #      还是确认中，执行的都同是 delete 末尾那一次 list 复查）
+  mk_itty
+  before=$(grep -Fc '|deleteVM|' "$T/calls.log")
+  print -r -- "$T/vms/itvm.vmwarevm/itvm.vmx" > "$T/extra-running"
+  pty_run 'vm delete itvm' 'itvm'
+  rm -f "$T/extra-running"
+  chk "运行中 VM 交互确认后仍被拦截" "正在运行"
+  after=$(grep -Fc '|deleteVM|' "$T/calls.log")
+  eq "运行拦截时不调用 deleteVM" "$before" "$after"
+  [[ -e "$T/vms/itvm.vmwarevm/itvm.vmx" ]]
+  ok "运行拦截后 .vmx 仍在"
+
+  # 23. TTY（pty）输出：颜色正常渲染、%F{red} 名字按字面显示
+  mkdir -p "$T/vms/%F{red}tty.vmwarevm"
+  : > "$T/vms/%F{red}tty.vmwarevm/%F{red}tty.vmx" || die touch
+  vm scan >/dev/null 2>&1
+  pty_run 'vm vms'
+  [[ "$out" == *$'\e['* ]]
+  ok "TTY 输出渲染 ANSI 颜色"
+  [[ "$out" == *'%F{red}tty'* ]]
+  ok "TTY 下 %F{red} 名字按字面显示（不被展开）"
+  rm -rf "$T/vms/%F{red}tty.vmwarevm"
+  : > "$T/inventory"
+  vm scan >/dev/null 2>&1
+fi
 
 # ── 补全注册时序 ─────────────────────────────────────────────────
 _vm_p -P "%F{cyan}== 补全注册时序 ==%f"
