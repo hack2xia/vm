@@ -27,7 +27,7 @@
 # ── 1. 版本 ─────────────────────────────────────────────────────
 # 与 CHANGELOG.md 保持一致；报障时 `vm version` + `vm doctor` 输出是最好的
 # 现场信息
-_VM_VERSION="0.1.2"
+_VM_VERSION="0.1.3"
 
 # ── 2. vmrun 解析（显式依赖，不走 PATH 优先级）──────────────────
 # VMRUN_BIN 是唯一会执行的 vmrun。默认解析为 Fusion 的绝对路径；PATH 追加
@@ -42,9 +42,24 @@ if [[ -z "${VMRUN_BIN:-}" ]]; then
     VMRUN_BIN="$(whence -p vmrun 2>/dev/null)"
     [[ -n "$VMRUN_BIN" ]] || VMRUN_BIN="vmrun"   # 找不到则调用时报错，doctor 显式诊断
   fi
-elif [[ "$VMRUN_BIN" != /* || ! -x "$VMRUN_BIN" ]]; then
-  # 覆盖值非法不 abort source（.zshrc 场景不能因此中断），警告后按原值使用
-  print -u2 -- "vm.zsh: VMRUN_BIN 覆盖无效（非绝对路径或不可执行），按原值使用: ${VMRUN_BIN//\%/%%}"
+elif [[ "$VMRUN_BIN" != /* ]]; then
+  # 覆盖为裸名（非绝对路径）：能从 PATH 解析出可执行文件就规范化为绝对路径，
+  # 让「doctor 显示的」与「实际执行的」严格一致；解析不出则按原值保留——
+  # 调用必然失败（127），绝不回退默认解析，避免误配置静默落到真实 vmrun。
+  _vm_vmrun_resolved="$(whence -p -- "$VMRUN_BIN" 2>/dev/null)"
+  if [[ -n "$_vm_vmrun_resolved" && -x "$_vm_vmrun_resolved" ]]; then
+    print -u2 -- "vm.zsh: VMRUN_BIN 覆盖非绝对路径，已解析为: $_vm_vmrun_resolved"
+    VMRUN_BIN="$_vm_vmrun_resolved"
+  else
+    print -u2 -- "vm.zsh: VMRUN_BIN 覆盖无效（PATH 上找不到可执行的 ${VMRUN_BIN//\%/%%}），按原值使用（调用将失败，vm doctor 可诊断）"
+  fi
+  unset _vm_vmrun_resolved
+elif [[ ! -x "$VMRUN_BIN" ]]; then
+  # 覆盖为不可执行/不存在的绝对路径：不 abort source（.zshrc 场景不能因此
+  # 中断），警告后按原值保留——调用必然失败（126/127），与 doctor 的 ✗
+  # 一致（fail-closed）；同样不回退默认解析，否则测试注入的「vmrun 缺失」
+  # 场景会静默落到真实 vmrun。
+  print -u2 -- "vm.zsh: VMRUN_BIN 覆盖无效（不可执行），按原值使用（调用将失败，vm doctor 可诊断）: ${VMRUN_BIN//\%/%%}"
 fi
 if [[ -d "$_vm_fusion_bindir" && ":$PATH:" != *":$_vm_fusion_bindir:"* ]]; then
   export PATH="$PATH:$_vm_fusion_bindir"
@@ -197,6 +212,17 @@ _vm_running() {
     [[ -n "$pid" && "$pid" == "$myid" ]] && return 0
   done
   return 1
+}
+
+# vmrun list 输出格式校验：正常输出必含 "Total running VMs:" 表头。
+# rc=0 但缺表头（假/不兼容 vmrun、协议变化、输出被截断）不能当成
+# 「零台运行」——status 会谎报状态，delete 的运行保护会被绕过。
+# 调用方必须把缺表头按「查询失败」处理（delete 拒绝删除）。
+_vm_list_header() {
+  emulate -L zsh
+  local -a l
+  l=("${(f)1}")
+  [[ -n "${l[(r)Total running VMs:*]}" ]]
 }
 
 # 冲突短名的状态变更保护：同名但路径不同、无法确定用户指哪一台时，
@@ -527,6 +553,12 @@ vm() {
         [[ -n "$out" ]] && _vm_p -rP "  $(_vm_esc "$out")" >&2
         return $rc
       fi
+      # rc=0 但缺表头同样不能当成「零台运行」（见 _vm_list_header）
+      if ! _vm_list_header "$out"; then
+        _vm_p -P "%F{red}✗ vmrun list 输出异常（缺少 Total running VMs 表头，vmrun 是否兼容？）%f" >&2
+        [[ -n "$out" ]] && _vm_p -rP "  $(_vm_esc "$out")" >&2
+        return 1
+      fi
       running=(${${(f)out}:#Total running VMs:*})
       # 运行比对按文件身份（设备+inode，见 _vm_running）：vmrun 回显路径的
       # 大小写/符号链接形态可能与清单不同，字符串比对会误判「未运行」
@@ -755,6 +787,11 @@ vm() {
         _vm_p -P "%F{red}✗ 无法确认 VM 是否在运行（vmrun list 失败），拒绝删除%f" >&2
         return $rc
       fi
+      # 输出异常（缺表头）与调用失败同等对待：宁可不删，不可误判「未运行」
+      if ! _vm_list_header "$listout"; then
+        _vm_p -P "%F{red}✗ 无法确认 VM 是否在运行（vmrun list 输出异常），拒绝删除%f" >&2
+        return 1
+      fi
       local -a running
       running=(${${(f)listout}:#Total running VMs:*})
       if _vm_running "$vmx" "${running[@]}"; then
@@ -809,7 +846,7 @@ vm() {
       # 只读体检：不改动任何状态，装完/升级后一次看清环境是否完整。
       # ✗ 计入失败（退出码 1），! 仅提示（环境仍可用）。
       _vm_need $# 0 'doctor' || return 1
-      local ok=1 fver probeout proberc n
+      local ok=1 fver probeout proberc hdr n
       local -a probelines
       _vm_p -P "%F{cyan}== vm doctor ==%f"
       _vm_p -P "  版本: vm.zsh $_VM_VERSION"
@@ -848,8 +885,16 @@ vm() {
         # 两个坑：(r) 才取匹配元素（(I) 取行号，表头恒为 1）；且下标必须
         # 落在中间数组上——嵌套 ${${(f)x}[(r)…]} 会退化成标量下标返回首字符
         probelines=("${(f)probeout}")
-        n="${${probelines[(r)Total running VMs:*]}//[!0-9]/}"
-        _vm_p -P "%F{green}✓ vmrun list%f 探活正常，当前运行 ${n:-0} 台"
+        hdr="${probelines[(r)Total running VMs:*]}"
+        if [[ -z "$hdr" ]]; then
+          # rc=0 但缺表头：探活的是假/不兼容 vmrun，不能算 ✓
+          ok=0
+          _vm_p -P "%F{red}✗ vmrun list 输出异常（缺少 Total running VMs 表头，vmrun 是否兼容？）%f"
+          [[ -n "$probeout" ]] && _vm_p -rP "  $(_vm_esc "$probeout")" >&2
+        else
+          n="${hdr//[!0-9]/}"
+          _vm_p -P "%F{green}✓ vmrun list%f 探活正常，当前运行 ${n:-0} 台"
+        fi
       else
         ok=0
         _vm_p -P "%F{red}✗ vmrun list 探活失败（rc=$proberc，Fusion 未启动？）%f"

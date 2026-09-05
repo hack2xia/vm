@@ -1,11 +1,16 @@
 # Changelog
 
-## [未发布]
+## [0.1.3] - 2026-09-05
+
+防御性加固版本：`vmrun list` 输出格式校验、`VMRUN_BIN` 非法覆盖语义收口。
 
 ### 新增
 - `vm version`：显示版本，stdout 纯净可捕获，配合 `vm doctor` 输出构成报障现场信息；`vm doctor` 顶部增加版本行。
+- `vmrun list` 输出格式校验：`rc=0` 但缺少 `Total running VMs:` 表头（假/不兼容 vmrun、协议变化、输出截断）不再当成「零台运行」——`vm status` 显式报错、`vm delete` 拒绝删除（运行保护宁可不删不误判）、`vm doctor` 判 ✗。
 
 ### 变更
+- `VMRUN_BIN` 非法覆盖语义收口：裸名（非绝对路径）可从 PATH 解析出可执行文件时自动规范化为绝对路径（doctor 显示与实际执行严格一致）；不存在/不可执行的值警告后按原值保留、调用必然失败（126/127）——与旧版差别是不再笼统「警告后按原值使用」，且任何情况下都不回退默认解析，避免误配置/测试注入失效时静默落到真实 vmrun。
+- 测试新增：`vmrun list` 输出异常（缺表头）时 `status` 失败/`delete` 拒绝、`VMRUN_BIN` 裸名规范化与解析失败不静默回退。断言总数 187。
 - CI 加固：声明 `permissions: contents: read`（最小权限）、job `timeout-minutes`、`concurrency` 取消同分支旧运行；语法检查覆盖 `_vm` 与 `tests/*.zsh` 全部文件；push 触发范围收敛到 `main` 与 `v*` 标签。
 - README 新增「故障排查」章节：短名冲突、清单陈旧、`vmrun list` 失败、`vmrun 不可用`（`VMRUN_BIN`）、Tools 未装影响面、外部 VM 删除风险。
 

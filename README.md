@@ -67,9 +67,9 @@ zsh 补全（子命令 / VM 短名 / 快照名）对两种加载顺序都能注�
 ## 设计要点
 
 - **trace 与结果分离**：回显的 `vmrun` 命令、警告全走 stderr，`vm ip` 的 stdout 只有 IP，可以直接 `ip=$(vm ip kali)`；失败时退出码可信，可脚本化判断。
-- **vmrun 单一入口**：所有调用统一走 `VMRUN_BIN`（默认解析为 Fusion 内的绝对路径），不依赖 PATH 优先级，避免 Homebrew/旧版本 `vmrun` 或同名函数导致「doctor 显示 A、实际执行 B」；`vm doctor` 显示的就是真正会执行的路径。
+- **vmrun 单一入口**：所有调用统一走 `VMRUN_BIN`（默认解析为 Fusion 内的绝对路径），不依赖 PATH 优先级，避免 Homebrew/旧版本 `vmrun` 或同名函数导致「doctor 显示 A、实际执行 B」；`vm doctor` 显示的就是真正会执行的路径。覆盖值为裸名时自动从 PATH 规范化为绝对路径；非法值按原值保留、调用必然失败，绝不静默回退到其他 `vmrun`。
 - **发现双来源**：Fusion 的 `vmInventory` 为主（路径大小写正确、覆盖默认目录之外的 VM），`VM_DIR` 下的 `.vmwarevm` 兜底；短名取磁盘真实目录名。同名合并按文件身份（设备+inode）判断：同一台（大小写/软链差异）用清单路径刷新；不同物理文件的同名 VM 只保留一台、警告冲突，且该短名的一切状态变更命令（`up`/`down`/`kill`/`reset`/`suspend`/`pause`/`unpause`/快照全部操作/`clone` 源/`delete`）都会被拒绝——拒绝时展示保留与被隐藏的全部冲突路径及解决指引，`vm vms` 在冲突短名行下追加冲突路径，`vm doctor` 列出完整冲突集合。`status`/`delete` 与 `vmrun list` 的运行比对同样按文件身份进行，清单路径是符号链接或大小写别名时不会误判运行状态。
-- **删除安全**：`vm delete` 在短名冲突、`.vmx` 已失效时拒绝；运行状态在交互确认之后、执行 `deleteVM` 之前最后一刻复查（确认期间 VM 被启动也拦得住），`vmrun list` 失败视为无法确认、拒绝删除；交互式必须输入短名确认，位于 `VM_DIR` 之外的 inventory-only VM 还要二次确认；自动化必须显式 `--yes`，且删除 `VM_DIR` 之外的 VM 还须加 `--allow-external`（`--yes` 单独不足以静默删除外部 VM）；支持 `vm delete -- <name>` 管理磁盘上已有的 `-` 开头名字。
+- **删除安全**：`vm delete` 在短名冲突、`.vmx` 已失效时拒绝；运行状态在交互确认之后、执行 `deleteVM` 之前最后一刻复查（确认期间 VM 被启动也拦得住），`vmrun list` 失败或输出异常（缺少 `Total running VMs` 表头）视为无法确认、拒绝删除；交互式必须输入短名确认，位于 `VM_DIR` 之外的 inventory-only VM 还要二次确认；自动化必须显式 `--yes`，且删除 `VM_DIR` 之外的 VM 还须加 `--allow-external`（`--yes` 单独不足以静默删除外部 VM）；支持 `vm delete -- <name>` 管理磁盘上已有的 `-` 开头名字。
 - **动态内容安全化**：所有动态内容（VM 名、路径、清单字段、外部命令输出）进入输出前统一经 `_vm_esc` 处理——`%` 转义防 prompt 展开吃掉内容，控制字符可见化（ESC→`^[`、CR→`^M`、LF→`\n`）防终端注入伪造显示；含 `%F{…}` 等序列的名字在任何输出模式下都原样可读。
 - **回显可复制执行**：每次执行前打印实际调用的 `vmrun` 命令，参数按 shell quoting 逐个表示（含空格的路径也能原样复制执行），防止忘记原用法。
 - 手动扫描模型：source 时扫一次，`vm scan` 手动刷新。
@@ -80,7 +80,7 @@ zsh 补全（子命令 / VM 短名 / 快照名）对两种加载顺序都能注�
 |---|---|---|
 | `VM_DIR` | `~/Virtual Machines.localized` | 兜底扫描目录（source 时规范化为绝对路径，相对路径覆盖也不会随 `cd` 失效） |
 | `VM_INVENTORY` | `~/Library/Application Support/VMware Fusion/vmInventory` | Fusion 清单（同上） |
-| `VMRUN_BIN` | Fusion 内 `vmrun` 的绝对路径 | 唯一实际执行的 `vmrun`；覆盖值须为绝对路径且可执行（测试用 fake 注入也走这里） |
+| `VMRUN_BIN` | Fusion 内 `vmrun` 的绝对路径 | 唯一实际执行的 `vmrun`；覆盖须为绝对路径且可执行——裸名会从 PATH 规范化为绝对路径，不存在/不可执行的值警告后按原值保留（调用必然失败，绝不回退默认解析）；测试用 fake 注入也走这里 |
 | `NO_COLOR` | 未设置 | 设置后（任意非空值）强制关闭彩色输出 |
 
 颜色输出按实际 stdout 判定：管道 / 重定向 / 命令替换中自动关闭，无需显式设置。
@@ -93,8 +93,8 @@ zsh 补全（子命令 / VM 短名 / 快照名）对两种加载顺序都能注�
 **新建/删除的 VM 没出现或没消失**
 扫描是手动模型：source 时扫一次，之后只读缓存，任何变化都需要 `vm scan` 刷新。注意 `vm status` 的「运行中」判定每次实时调 `vmrun list`，不受缓存影响；但缓存里的路径若已失效，删除命令会以「已不存在」拒绝，先 `vm scan` 即可。
 
-**「无法查询运行状态（vmrun list 失败）」**
-通常是 Fusion 未启动。状态查询失败会显式报错并透传退出码，绝不会伪装成「全部未运行」。启动 Fusion 后重试。
+**「无法查询运行状态（vmrun list 失败 / 输出异常）」**
+失败通常是 Fusion 未启动；返回成功但输出缺少 `Total running VMs` 表头，则说明执行的 `vmrun` 不兼容或输出被截断（`vm doctor` 会同样报 ✗）。两者都显式报错，绝不伪装成「全部未运行」。启动 Fusion、或用 `VMRUN_BIN` 指向正确的 `vmrun` 后重试。
 
 **「vmrun 不可用」**
 默认从 `/Applications/VMware Fusion.app` 解析 `vmrun` 的绝对路径。Fusion 装在别处或使用其他构建时，用 `VMRUN_BIN=/绝对路径/vmrun` 显式指定；`vm doctor` 显示的就是实际会执行的路径。

@@ -650,6 +650,48 @@ chk "回显中含空格参数被 quoting" 'sp\ ace'
 rm -rf "$T/vms/sp ace.vmwarevm"
 vm scan >/dev/null 2>&1
 
+# ── 回归：vmrun list 格式校验 / VMRUN_BIN 规范化 ────────────────
+_vm_p -P "%F{cyan}== list 格式校验与 VMRUN_BIN 规范化 =="
+
+# 18. rc=0 但输出缺少 Total running VMs 表头（假/不兼容 vmrun）：
+#     不能当成「零台运行」——status 显式失败；delete 的运行保护拒绝删除
+mkdir -p "$T/garbagebin" || die garbagebin
+cat <<FAKE3 > "$T/garbagebin/vmrun" || die garbagebin-vmrun
+#!/bin/zsh
+case "\$3" in
+  list) echo "some incompatible output" ;;
+esac
+FAKE3
+chmod +x "$T/garbagebin/vmrun" || die garbagebin-chmod
+out="$(VMRUN_BIN="$T/garbagebin/vmrun" zsh -c 'source "$1" 2>/dev/null; vm status "Kali Linux"' _ "$VM_ZSH" 2>&1)"; rc=$?
+eq "list 输出异常时 status rc=1" "1" "$rc"
+chk "status 提示输出异常" "输出异常"
+out="$(VMRUN_BIN="$T/garbagebin/vmrun" zsh -c 'source "$1" 2>/dev/null; vm delete "Kali Linux" --yes' _ "$VM_ZSH" 2>&1)"; rc=$?
+eq "list 输出异常时 delete 拒绝 rc=1" "1" "$rc"
+chk "delete 提示无法确认运行状态" "无法确认"
+[[ -e "$T/vms/Kali Linux.vmwarevm/Kali Linux.vmx" ]]
+ok "list 输出异常时 .vmx 未被删除"
+
+# 19. VMRUN_BIN 裸名覆盖：可执行时从 PATH 规范化为绝对路径，
+#     doctor 显示的与实际执行的严格一致
+mkdir -p "$T/barebin" || die barebin
+cat <<FAKE4 > "$T/barebin/vmrun" || die barebin-vmrun
+#!/bin/zsh
+case "\$3" in
+  list) echo "Total running VMs: 0" ;;
+esac
+FAKE4
+chmod +x "$T/barebin/vmrun" || die barebin-chmod
+out="$(PATH="$T/barebin:$PATH" VMRUN_BIN=vmrun zsh -c 'source "$1" 2>/dev/null; vm doctor' _ "$VM_ZSH" 2>&1)"
+chk "VMRUN_BIN 裸名解析为绝对路径" "$T/barebin/vmrun"
+chk "解析后探活正常" "探活正常"
+# 19b. 裸名解析不出（PATH 上无此可执行文件）：警告保留原值，调用必然失败，
+#      绝不回退默认解析（否则会静默落到真实 vmrun）
+out="$(PATH="$T/barebin:$PATH" VMRUN_BIN=nosuchvmrun zsh -c 'source "$1" 2>&1; vm status "Kali Linux"' _ "$VM_ZSH" 2>&1)"; rc=$?
+chk "裸名解析失败时警告按原值保留" "按原值使用"
+(( rc == 127 ))
+ok "裸名解析失败时调用失败（rc=127，不静默回退）"
+
 # ── 回归：zpty 真实交互删除 + TTY 输出 ──────────────────────────
 _vm_p -P "%F{cyan}== zpty 交互删除与 TTY 输出 =="
 if ! zmodload zsh/zpty 2>/dev/null; then
