@@ -398,12 +398,15 @@ _vm_snap_names() {
 
 # 查询 VMware Tools 状态。checkToolsState 在关机/挂起状态下也能查，
 # 但挂起（paused）时可能返回 unknown；输出只认白名单，避免把报错当状态。
+# 返回中文名称（原始枚举 installed/notInstalled 对用户不可读）。
 _vm_tools() {
   local s
   s="$(_vmrun checkToolsState "$1" 2>/dev/null)"
   case "$s" in
-    installed|notInstalled|running) print -rn -- "$s" ;;
-    *)                              print -rn -- "unknown" ;;
+    installed)    print -rn -- "已安装" ;;
+    running)      print -rn -- "运行中" ;;
+    notInstalled) print -rn -- "未安装" ;;
+    *)            print -rn -- "未知" ;;
   esac
 }
 
@@ -417,16 +420,17 @@ _vm_dispwidth() {
 
 # 状态表格的一行：$1 = 短名，$2 = 圆点（含颜色），$3 = 运行状态，$4 = Tools 状态
 # $5/$6 = 名称列/显示名列的显示宽度（缺省 14）；padding 用 (mr:) 按屏幕列宽
+# 清单状态（VM_STATE）不进表格：normal/空是常态，占一列纯噪音，
+# 异常值由 status 在表格后集中附注
 _vm_status_line() {
-  local n="$1" m="$2" s="$3" t="$4" nw="${5:-14}" dw="${6:-14}" a b c d
+  local n="$1" m="$2" s="$3" t="$4" nw="${5:-14}" dw="${6:-14}" a b d
   # 先按列宽补齐再安全化（% 转义 + 控制字符可见化）：顺序反了会让含 % 的
   # 名字按转义后的长度补齐，列被顶偏；安全化可能加宽（控制字符→2 列），
   # 极端名字下列会有毫米级偏差，可接受
   a="$(_vm_esc "${(mr:nw:)n}")"
   b="$(_vm_esc "${(mr:dw:)VM_DISPLAY[$n]}")"
-  c="$(_vm_esc "${(mr:8:)${VM_STATE[$n]:-未知}}")"
-  d="$(_vm_esc "${(mr:13:)${t:-unknown}}")"
-  _vm_p -rP -- "  $m %F{cyan}${a}%f ${b} ${c} ${d} $s"
+  d="$(_vm_esc "${(mr:8:)${t:-未知}}")"
+  _vm_p -rP -- "  $m %F{cyan}${a}%f ${b} ${d} $s"
 }
 
 # ── 6. 帮助 ────────────────────────────────────────────────────
@@ -439,7 +443,7 @@ vm — VMware Fusion (headless) 管理
   vm vms               列出已发现的虚拟机（短名 + .vmx 路径）
   vm doctor            环境体检：vmrun/路径/探活（只读诊断）
   vm list              列出正在运行的虚拟机（vmrun list）
-  vm status [name]     查看状态：清单状态 + 是否正在运行
+  vm status [name]     查看状态：电源 / VMware Tools / 清单状态
 
 电源:
   vm up <name>         启动（start nogui）
@@ -570,9 +574,21 @@ vm() {
         else
           mark="%F{white}○%f"; state="未运行"
         fi
-        _vm_status_line "$name" "$mark" "$state" "$(_vm_tools "$vmx")" \
-          "$(_vm_dispwidth "$name")" "$(_vm_dispwidth "${VM_DISPLAY[$name]}")"
-        _vm_p -rP "      .vmx: $(_vm_esc "${VM_VMX[$name]}")"
+        # 单台模式用标签化逐行输出：无表头的多列并排靠猜，逐行带主语才可读
+        local disp="${VM_DISPLAY[$name]}" inv="${VM_STATE[$name]}" t
+        t="$(_vm_tools "$vmx")"
+        if [[ -n "$disp" && "$disp" != "$name" ]]; then
+          _vm_p -rP -- "  $mark %F{cyan}$(_vm_esc "$name")%f（$(_vm_esc "$disp")）"
+        else
+          _vm_p -rP -- "  $mark %F{cyan}$(_vm_esc "$name")%f"
+        fi
+        _vm_p -rP "      电源:  $state"
+        _vm_p -rP "      Tools: $(_vm_esc "$t")"
+        # unknown 常见于挂起/未开机时 checkToolsState 查不到，附一句原因免得用户疑心
+        [[ "$t" == 未知 ]] && _vm_p -P "             （挂起或未开机时可能查不到）"
+        [[ -n "$inv" && "$inv" != normal ]] && \
+          _vm_p -rP "      清单:  $(_vm_esc "$inv")（Fusion 库标记）"
+        _vm_p -rP "      .vmx:  $(_vm_esc "${VM_VMX[$name]}")"
       else
         (( ${#VM_VMX} )) || { _vm_p -P "%F{yellow}未发现任何虚拟机，执行: vm scan%f"; return 0; }
         # 列宽取最长名称的显示宽度（宽字符按 2 列），避免长名/CJK 名顶偏后续列
@@ -590,6 +606,11 @@ vm() {
             mark="%F{white}○%f"; state="未运行"
           fi
           _vm_status_line "$name" "$mark" "$state" "$(_vm_tools "${VM_VMX[$name]}")" "$nw" "$dw"
+        done
+        # 清单状态 abnormal 值（orphaned/paused…）集中附注；normal/空不显示
+        for name in ${(ok)VM_VMX}; do
+          [[ -n "${VM_STATE[$name]}" && "${VM_STATE[$name]}" != normal ]] && \
+            _vm_p -rP "  · 清单状态: %F{cyan}$(_vm_esc "$name")%f = $(_vm_esc "${VM_STATE[$name]}")（Fusion 库标记）"
         done
       fi
       ;;
