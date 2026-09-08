@@ -296,7 +296,7 @@ _vmrun() { "$VMRUN_BIN" -T fusion "$@"; }
 # 这样 `ip=$(vm ip kali)` 才能只拿到 IP。
 _vm_echo() {
   local -a q=("${(@q)@}")
-  _vm_p -rP "%F{cyan}➤ vmrun -T fusion ${${(j: :)q}//\%/%%}%f" >&2
+  _vm_p -rP "%F{cyan}➤ 原生命令: vmrun -T fusion ${${(j: :)q}//\%/%%}%f" >&2
 }
 
 _vm_resolve() {
@@ -366,27 +366,6 @@ _vm_parse_wait() {
     shift
   done
   reply=("${(@)rest}")
-}
-
-# 快照备注：vmrun 官方拿不到 description，这里解析同目录 .vmsd 补充
-_vm_snap_notes() {
-  emulate -L zsh
-  local vmsd="$1" i sname sdesc
-  local -a idxs
-  [[ -f "$vmsd" ]] || { _vm_p -P "%F{yellow}（未找到 .vmsd，无法读取备注）%f"; return 0; }
-
-  # 快照编号在删过中间快照后可能不连续，所以直接枚举实际存在的编号
-  idxs=(${${(f)"$(grep -oE '^snapshot[0-9]+\.displayName' "$vmsd")"}//[!0-9]/})
-  (( ${#idxs} )) || { _vm_p -P "%F{yellow}（.vmsd 中无快照备注）%f"; return 0; }
-
-  _vm_p -P "%F{green}— 快照备注（.vmsd）—%f"
-  for i in ${(n)idxs}; do
-    sname=$(grep -E "^snapshot${i}\.displayName" "$vmsd" \
-            | sed -E 's/^[^=]*= *"//; s/[[:space:]]*"[[:space:]]*$//')
-    sdesc=$(grep -E "^snapshot${i}\.description" "$vmsd" \
-            | sed -E 's/^[^=]*= *"//; s/[[:space:]]*"[[:space:]]*$//')
-    _vm_p -rP "  %F{cyan}$(_vm_esc "${sname:-<未命名>}")%f  %F{yellow}备注:%f $(_vm_esc "${sdesc:-<无>}")"
-  done
 }
 
 # 从 .vmsd 提取快照名（解析规则与 _vm_snap_notes 一致），一行一个
@@ -620,12 +599,42 @@ vm() {
       case "$sub" in
         list)
           _vm_need $# 1 'snap list <name>' || return 1
-          local vmx rc; vmx=$(_vm_resolve "${1:-}") || return 1
+          local vmx rc out line n indent i sname sdesc vmsd
+          vmx=$(_vm_resolve "${1:-}") || return 1
           _vm_echo listSnapshots "$vmx"
-          _vmrun listSnapshots "$vmx"
+          out="$(_vmrun listSnapshots "$vmx" 2>&1)"
           rc=$?
-          _vm_snap_notes "${vmx:r}.vmsd"
-          return $rc   # listSnapshots 失败不能被 .vmsd 备注解析掩盖
+          if (( rc != 0 )); then
+            # 失败时原样透出报错，rc 不被备注解析掩盖
+            [[ -n "$out" ]] && _vm_p -rP "  $(_vm_esc "$out")" >&2
+            return $rc
+          fi
+          # vmrun 官方拿不到快照 description，解析同目录 .vmsd 按名补充；
+          # 文件缺失/无备注就静默跳过，不为附加信息输出提示
+          local -A notes=()
+          vmsd="${vmx:r}.vmsd"
+          if [[ -f "$vmsd" ]]; then
+            # 快照编号在删过中间快照后可能不连续，所以直接枚举实际存在的编号
+            for i in ${(n)${${(f)"$(grep -oE '^snapshot[0-9]+\.displayName' "$vmsd" 2>/dev/null)"}//[!0-9]/}}; do
+              sname=$(grep -E "^snapshot${i}\.displayName" "$vmsd" \
+                      | sed -E 's/^[^=]*= *"//; s/[[:space:]]*"[[:space:]]*$//')
+              sdesc=$(grep -E "^snapshot${i}\.description" "$vmsd" \
+                      | sed -E 's/^[^=]*= *"//; s/[[:space:]]*"[[:space:]]*$//')
+              [[ -n "$sname" ]] && notes[$sname]="$sdesc"
+            done
+          fi
+          # 正文逐行输出（保留 vmrun 的层级缩进），表头与空行不进计数
+          local -a lines=("${(@f)out}") body=()
+          shift lines
+          for line in "$lines[@]"; do
+            [[ -n "${line//[[:space:]]/}" ]] && body+=("$line")
+          done
+          _vm_p -P "%F{green}共 ${#body} 个快照：%f"
+          for line in "$body[@]"; do
+            n="${line##[[:space:]]#}"
+            indent="${line%"$n"}"
+            _vm_p -rP "  ${indent}%F{cyan}$(_vm_esc "$n")%f"${notes[$n]:+"  %F{yellow}备注:%f $(_vm_esc "${notes[$n]}")"}
+          done
           ;;
         create|delete|revert)
           _vm_need $# 2 "snap $sub <name> <snap>" || return 1

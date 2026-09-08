@@ -220,7 +220,9 @@ eq "缺参数 rc=1" "1" "$rc"
 # ── 快照 ─────────────────────────────────────────────────────────
 _vm_p -P "%F{cyan}== 快照 ==%f"
 out="$(vm snap list 'kali linux' 2>&1)"
+chk "vmrun 回显带原生命令标识" "➤ 原生命令: vmrun -T fusion listSnapshots"
 chk "listSnapshots 输出" "after-setup"
+chk "snap list 计数行" "共 2 个快照"
 # .vmsd 放在 .vmx 旁（${vmx:r}.vmsd = Kali Linux.vmsd）
 cat <<'VMSD' > "$T/vms/Kali Linux.vmwarevm/Kali Linux.vmsd" || die vmsd
 snapshot0.displayName = "base"
@@ -234,8 +236,10 @@ chk "多条备注" "装完 Tools"
 FAKE_SNAP_FAIL=1
 export FAKE_SNAP_FAIL
 out="$(vm snap list 'kali linux' 2>/dev/null)"; rc=$?
-unset FAKE_SNAP_FAIL
 eq "listSnapshots 失败 rc 透传（不被备注解析掩盖）" "1" "$rc"
+out="$(vm snap list 'kali linux' 2>&1)"
+unset FAKE_SNAP_FAIL
+chk "listSnapshots 失败报错透出" "Error: snapshot list failed"
 
 # create/delete/revert 的 argv 契约与错误码（Kali 不冲突、未运行，可正常调用）
 : > "$T/calls.log"
