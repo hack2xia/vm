@@ -403,6 +403,63 @@ vm kill Debian >/dev/null 2>&1
 after=$(wc -l < "$T/calls.log")
 eq "冲突拒绝时不调用 vmrun" "$before" "$after"
 
+# 3b. 清单重复条目：多条 vmlist 指向同一物理文件（Fusion GUI moved/copied
+#     后旧条目残留的真实事故）。UUID 与 .vmx uuid.bios 一致者是活条目——
+#     即使 id 数值更大也要胜出；陈尸条目的 State 不得污染状态显示
+mkdir -p "$T/vms/Dup.vmwarevm"
+cat <<'VMX' > "$T/vms/Dup.vmwarevm/Dup.vmx" || die vmx
+.encoding = "UTF-8"
+uuid.bios = "56 4d aa aa"
+VMX
+cat <<INV > "$T/inventory" || die inventory
+.encoding = "UTF-8"
+vmlist4.config = "$T/vms/Dup.vmwarevm/Dup.vmx"
+vmlist4.DisplayName = "Dup stale"
+vmlist4.State = "paused"
+vmlist4.UUID = "56 4d bb bb"
+vmlist10.config = "$T/vms/Dup.vmwarevm/Dup.vmx"
+vmlist10.DisplayName = "Dup live"
+vmlist10.State = "normal"
+vmlist10.UUID = "56 4d aa aa"
+INV
+vm scan >"$T/scan.out" 2>"$T/scan.err"
+out="$(<$T/scan.err)"
+chk "重复条目有警告" "重复条目"
+chk "UUID 一致者胜出（id 大的也能赢）" "UUID"
+out="$(vm vms 2>&1)"
+chk "保留活条目的显示名" "Dup live"
+[[ "$out" != *"Dup stale"* ]]
+ok "陈尸条目不进入管理列表"
+out="$(vm status Dup 2>&1)"
+[[ "$out" != *paused* ]]
+ok "陈尸 State（paused）不再污染状态显示"
+
+# 3c. 无 UUID 可比对时退回「保留首个」，首个按 id 数值序（vmlist4 先于
+#     vmlist10；字典序会错把 10 排在 4 前面）
+cat <<INV > "$T/inventory" || die inventory
+.encoding = "UTF-8"
+vmlist10.config = "$T/vms/Dup.vmwarevm/Dup.vmx"
+vmlist10.DisplayName = "Dup newer"
+vmlist10.State = "normal"
+vmlist4.config = "$T/vms/Dup.vmwarevm/Dup.vmx"
+vmlist4.DisplayName = "Dup first"
+vmlist4.State = "normal"
+INV
+vm scan >"$T/scan.out" 2>"$T/scan.err"
+out="$(<$T/scan.err)"
+chk "无 UUID 时警告保留首个" "保留首个"
+out="$(vm vms 2>&1)"
+chk "首个按 id 数值序（vmlist4 胜出）" "Dup first"
+# 收尾：恢复 test 3 的 Debian 冲突夹具，后续 delete/冲突用例依赖它
+rm -rf "$T/vms/Dup.vmwarevm"
+cat <<INV > "$T/inventory" || die inventory
+.encoding = "UTF-8"
+vmlist1.config = "$T/other2/Debian.vmwarevm/Debian.vmx"
+vmlist1.DisplayName = "Debian mirror"
+vmlist1.State = "normal"
+INV
+vm scan >/dev/null 2>&1
+
 # 4. clone：full+snapshot 显式拒绝；失败清理本次创建的目录、可立即重试
 out="$(vm clone 'kali linux' fullsnap full base 2>&1)"; rc=$?
 eq "full 克隆指定 snapshot 被拒绝" "1" "$rc"

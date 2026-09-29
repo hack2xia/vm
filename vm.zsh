@@ -27,7 +27,7 @@
 # ── 1. 版本 ─────────────────────────────────────────────────────
 # 与 CHANGELOG.md 保持一致；报障时 `vm version` + `vm doctor` 输出是最好的
 # 现场信息
-_VM_VERSION="0.1.3"
+_VM_VERSION="0.1.4"
 
 # ── 2. vmrun 解析（显式依赖，不走 PATH 优先级）──────────────────
 # VMRUN_BIN 是唯一会执行的 vmrun。默认解析为 Fusion 的绝对路径；PATH 追加
@@ -86,9 +86,9 @@ typeset -A VM_CONFLICT=() # 短名 → 冲突路径列表（换行分隔）：�
 # ── 4. 扫描：仅 source 末尾与 `vm scan` 时调用 ──────────────────
 vm_scan() {
   emulate -L zsh
-  local d f name invname id line key val chosen
+  local d f name invname id invnum line key val chosen
   local -a hits
-  local -A cfg=() disp=() st=() seen=() src=()
+  local -A cfg=() disp=() st=() uu=() seen=() src=() invid=()
   local nl=$'\n'
 
   VM_VMX=(); VM_DISPLAY=(); VM_STATE=(); VM_LC=(); VM_CONFLICT=()
@@ -128,7 +128,8 @@ vm_scan() {
   # 3b. 再用 Fusion 清单补全。每条记录先统一验证路径，再做名称合并：
   #     同一物理文件（清单与磁盘大小写/符号链接不同）→ 用清单路径刷新显示名与状态；
   #     不同物理文件但短名相同 → 冲突，保留先出现的并记入 VM_CONFLICT（供破坏性命令拒绝）。
-  #     按 id 排序遍历，保证「保留首个」的结果稳定可复现。
+  #     按 id 数值序遍历（vmlist4 先于 vmlist10；字典序会把 10 排到 4 前面），
+  #     保证「保留首个」的结果稳定可复现且符合注册先后。
   local invpath
   if [[ -f "$VM_INVENTORY" ]]; then
     while IFS= read -r line; do
@@ -138,11 +139,13 @@ vm_scan() {
         vmlist*.config)      id="${key%.config}";      cfg[$id]="$val" ;;
         vmlist*.DisplayName) id="${key%.DisplayName}"; disp[$id]="$val" ;;
         vmlist*.State)       id="${key%.State}";       st[$id]="$val" ;;
+        vmlist*.UUID)        id="${key%.UUID}";        uu[$id]="$val" ;;
       esac
     done < "$VM_INVENTORY"
   fi
 
-  for id in ${(ok)cfg}; do
+  for invnum in ${(on)${${(k)cfg}#vmlist}}; do
+    id="vmlist$invnum"
     [[ -n "${cfg[$id]}" ]] || continue          # 清单里已移除的占位条目
     invpath="${cfg[$id]}"
     invname="${invpath:h:t}"; invname="${invname%.vmwarevm}"
@@ -161,13 +164,31 @@ vm_scan() {
       VM_STATE[$name]="${st[$id]}"
       seen[${name:l}]="$name"
       src[$name]=inv
+      invid[$name]="$id"
       continue
     fi
     # 同名已存在：按文件身份（设备+inode，跟随符号链接）判断是否同一台，
     # 而不是比较路径字符串——同一文件在清单与磁盘上可能大小写/软链不同。
     if _vm_same_file "${VM_VMX[$name]}" "$invpath"; then
       if [[ "${src[$name]}" == inv ]]; then
-        _vm_p -P "%F{yellow}! 清单里 $(_vm_esc "$name") 有重复条目，保留首个%f" >&2
+        # 同一物理文件的多条清单条目（GUI moved/copied 后旧条目残留）：
+        # UUID 与 .vmx uuid.bios 一致者才是 Fusion 登记的活条目——陈尸条目的
+        # State（如 paused）会污染状态显示；两边都匹配不上退回保留首个
+        local thisuuid="${(L)uu[$id]}" vmxuuid="" keptuuid=""
+        if [[ -n "$thisuuid" ]]; then
+          vmxuuid="${(L)$(_vm_vmx_uuid "$invpath")}"
+          keptuuid="${(L)uu[${invid[$name]}]}"
+        fi
+        if [[ -n "$thisuuid" && -n "$vmxuuid" && \
+              "$thisuuid" == "$vmxuuid" && "$keptuuid" != "$vmxuuid" ]]; then
+          _vm_p -P "%F{yellow}! 清单里 $(_vm_esc "$name") 有重复条目，保留 UUID 与 .vmx 一致者%f" >&2
+          VM_VMX[$name]="$invpath"
+          VM_DISPLAY[$name]="${disp[$id]:-$name}"
+          VM_STATE[$name]="${st[$id]}"
+          invid[$name]="$id"
+        else
+          _vm_p -P "%F{yellow}! 清单里 $(_vm_esc "$name") 有重复条目，保留首个%f" >&2
+        fi
         continue
       fi
       # 磁盘先发现、清单是同一台：用清单路径刷新（大小写正确），并带上清单的显示名/状态
@@ -175,6 +196,7 @@ vm_scan() {
       VM_DISPLAY[$name]="${disp[$id]:-$name}"
       VM_STATE[$name]="${st[$id]}"
       src[$name]=inv
+      invid[$name]="$id"
     else
       # 同名但物理上是两台不同的 VM：仅靠短名无法区分 → 冲突
       _vm_p -P "%F{yellow}! 短名冲突: $(_vm_esc "$name") 同时对应 $(_vm_esc "${VM_VMX[$name]}") 和 $(_vm_esc "$invpath")，仅保留前者；该短名的破坏性命令将被拒绝%f" >&2
@@ -196,6 +218,20 @@ _vm_same_file() {
   ai="$(/usr/bin/stat -L -f '%d:%i' "$a" 2>/dev/null)" || return 1
   bi="$(/usr/bin/stat -L -f '%d:%i' "$b" 2>/dev/null)" || return 1
   [[ -n "$ai" && "$ai" == "$bi" ]]
+}
+
+# 读取 .vmx 的 uuid.bios（去引号去空白）：清单多条目指向同一物理文件时，
+# UUID 与之一致的条目才是 Fusion 当前登记的活条目（moved/copied 会改 UUID）
+_vm_vmx_uuid() {
+  emulate -L zsh
+  local line
+  line="$(grep -i '^uuid\.bios' "$1" 2>/dev/null | head -1)"
+  # 取首尾引号之间的内容：#[[:space:]]# 这类重复匹配要 EXTENDED_GLOB，
+  # 不能在这里用（emulate 后该选项关闭）
+  [[ "$line" == *\"*\"* ]] || return 1
+  line="${${line#*\"}%\"*}"
+  [[ -n "$line" ]] || return 1
+  print -rn -- "$line"
 }
 
 # 运行状态判断：$1 = 待检 .vmx，其余 = vmrun list 输出的路径行。
