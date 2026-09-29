@@ -36,9 +36,9 @@ if (( realn > 0 )); then
 fi
 [[ "$out" != *$'\e['* ]] || { print -r -- "FAIL: status 输出泄漏 ANSI 转义"; fail=1; }
 
-# 3. vms：扫描缓存与真实目录存在性抽查（只读，不触发电源操作）
-out="$(zsh -c 'source "$1" >/dev/null 2>&1; vm vms' _ "$VM_ZSH" 2>&1)"
-chk "vms 列表非空报错路径" "虚拟机"
+# 3. scan：重扫并列出，与真实目录存在性抽查（只读，不触发电源操作）
+out="$(zsh -c 'source "$1" >/dev/null 2>&1; vm scan' _ "$VM_ZSH" 2>&1)"
+chk "scan 列表非空报错路径" "虚拟机"
 
 (( fail )) && { print -u2 "SMOKE FAILED"; exit 1 }
 print -r -- "SMOKE PASS"

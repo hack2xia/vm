@@ -35,7 +35,7 @@ git clone https://github.com/hack2xia/vm.git ~/.config/vm   # 或把 vm.zsh 放�
 依赖 `/Applications/VMware Fusion.app`（`vmrun` 默认解析为其中的绝对路径执行，也可用 `VMRUN_BIN` 显式指定；脚本另会把 Fusion 的 `Contents/Public` 追加到 PATH 供手动使用）。`ip`/`down` 等依赖客户机 VMware Tools。
 
 - **环境要求**：macOS、zsh 5.x+、VMware Fusion（含 `vmrun`）。脚本不做重依赖，其余命令均为 macOS 自带工具。
-- **安装后验证**：新开一个 zsh 终端执行 `vm doctor`，各项 ✓ 即环境完整（它会真正探活 `vmrun list`，比 `vm vms` 更能证明安装成功）；看不到虚拟机先 `vm scan`。
+- **安装后验证**：新开一个 zsh 终端执行 `vm doctor`，各项 ✓ 即环境完整（它会真正探活 `vmrun list`，比 `vm scan` 更能证明安装成功）；看不到虚拟机先 `vm scan`。
 - **更新**：`git -C ~/.config/vm pull` 后重开终端（或重新 `source ~/.config/vm/vm.zsh`）。
 - **卸载**：删除 `.zshrc` 里的 source 行，再 `rm -rf ~/.config/vm`。脚本不写持久业务状态（inventory 只读、缓存仅在内存）；注意 source 会修改当前 shell 的 `PATH`/`fpath`/函数/变量，已打开的 shell 需重启或手动 unset 才完全还原。
 - 版本记录见 [CHANGELOG.md](CHANGELOG.md)。
@@ -43,7 +43,7 @@ git clone https://github.com/hack2xia/vm.git ~/.config/vm   # 或把 vm.zsh 放�
 ## 命令一览
 
 ```
-vm scan / vms / list / status [name]     发现与状态
+vm scan / list / status [name]           发现与状态
 vm doctor                                环境体检：vmrun/路径/探活（只读诊断）
 vm up / down / kill / suspend / pause / unpause / reset <name>   电源
 vm ip [-w] <name>                        获取客户机 IP（stdout 纯净，可 $( ) 捕获）
@@ -68,7 +68,7 @@ zsh 补全（子命令 / VM 短名 / 快照名）对两种加载顺序都能注�
 
 - **trace 与结果分离**：回显的 `vmrun` 命令、警告全走 stderr，`vm ip` 的 stdout 只有 IP，可以直接 `ip=$(vm ip kali)`；失败时退出码可信，可脚本化判断。
 - **vmrun 单一入口**：所有调用统一走 `VMRUN_BIN`（默认解析为 Fusion 内的绝对路径），不依赖 PATH 优先级，避免 Homebrew/旧版本 `vmrun` 或同名函数导致「doctor 显示 A、实际执行 B」；`vm doctor` 显示的就是真正会执行的路径。覆盖值为裸名时自动从 PATH 规范化为绝对路径；非法值按原值保留、调用必然失败，绝不静默回退到其他 `vmrun`。
-- **发现双来源**：Fusion 的 `vmInventory` 为主（路径大小写正确、覆盖默认目录之外的 VM），`VM_DIR` 下的 `.vmwarevm` 兜底；短名取磁盘真实目录名。同名合并按文件身份（设备+inode）判断：同一台（大小写/软链差异）用清单路径刷新；不同物理文件的同名 VM 只保留一台、警告冲突，且该短名的一切状态变更命令（`up`/`down`/`kill`/`reset`/`suspend`/`pause`/`unpause`/快照全部操作/`clone` 源/`delete`）都会被拒绝——拒绝时展示保留与被隐藏的全部冲突路径及解决指引，`vm vms` 在冲突短名行下追加冲突路径，`vm doctor` 列出完整冲突集合。`status`/`delete` 与 `vmrun list` 的运行比对同样按文件身份进行，清单路径是符号链接或大小写别名时不会误判运行状态。
+- **发现双来源**：Fusion 的 `vmInventory` 为主（路径大小写正确、覆盖默认目录之外的 VM），`VM_DIR` 下的 `.vmwarevm` 兜底；短名取磁盘真实目录名。同名合并按文件身份（设备+inode）判断：同一台（大小写/软链差异）用清单路径刷新；不同物理文件的同名 VM 只保留一台、警告冲突，且该短名的一切状态变更命令（`up`/`down`/`kill`/`reset`/`suspend`/`pause`/`unpause`/快照全部操作/`clone` 源/`delete`）都会被拒绝——拒绝时展示保留与被隐藏的全部冲突路径及解决指引，`vm scan` 在冲突短名行下追加冲突路径，`vm doctor` 列出完整冲突集合。`status`/`delete` 与 `vmrun list` 的运行比对同样按文件身份进行，清单路径是符号链接或大小写别名时不会误判运行状态。
 - **删除安全**：`vm delete` 在短名冲突、`.vmx` 已失效时拒绝；运行状态在交互确认之后、执行 `deleteVM` 之前最后一刻复查（确认期间 VM 被启动也拦得住），`vmrun list` 失败或输出异常（缺少 `Total running VMs` 表头）视为无法确认、拒绝删除；交互式必须输入短名确认，位于 `VM_DIR` 之外的 inventory-only VM 还要二次确认；自动化必须显式 `--yes`，且删除 `VM_DIR` 之外的 VM 还须加 `--allow-external`（`--yes` 单独不足以静默删除外部 VM）；支持 `vm delete -- <name>` 管理磁盘上已有的 `-` 开头名字。
 - **动态内容安全化**：所有动态内容（VM 名、路径、清单字段、外部命令输出）进入输出前统一经 `_vm_esc` 处理——`%` 转义防 prompt 展开吃掉内容，控制字符可见化（ESC→`^[`、CR→`^M`、LF→`\n`）防终端注入伪造显示；含 `%F{…}` 等序列的名字在任何输出模式下都原样可读。
 - **回显可复制执行**：每次执行前打印实际调用的 `vmrun` 命令，参数按 shell quoting 逐个表示（含空格的路径也能原样复制执行），防止忘记原用法。
@@ -88,7 +88,7 @@ zsh 补全（子命令 / VM 短名 / 快照名）对两种加载顺序都能注�
 ## 故障排查
 
 **「短名 X 对应不止一台虚拟机」**
-两台不同的物理 VM 映射到了同一短名（常见于不同目录下的同名 bundle，或清单与磁盘同名）。此时该短名的一切状态变更命令都会被拒绝——这是有意的，绝不猜测你想操作哪一台。解决：`vm vms` 会在冲突短名下列出保留路径与全部冲突路径（`vm doctor` 同样列出）；把其中一个 bundle 重命名，或在 Fusion 里移除清单中的陈旧条目，然后 `vm scan`。
+两台不同的物理 VM 映射到了同一短名（常见于不同目录下的同名 bundle，或清单与磁盘同名）。此时该短名的一切状态变更命令都会被拒绝——这是有意的，绝不猜测你想操作哪一台。解决：`vm scan` 会在冲突短名下列出保留路径与全部冲突路径（`vm doctor` 同样列出）；把其中一个 bundle 重命名，或在 Fusion 里移除清单中的陈旧条目，然后重新 `vm scan`。
 
 **新建/删除的 VM 没出现或没消失**
 扫描是手动模型：source 时扫一次，之后只读缓存，任何变化都需要 `vm scan` 刷新。注意 `vm status` 的「运行中」判定每次实时调 `vmrun list`，不受缓存影响；但缓存里的路径若已失效，删除命令会以「已不存在」拒绝，先 `vm scan` 即可。
@@ -102,7 +102,7 @@ zsh 补全（子命令 / VM 短名 / 快照名）对两种加载顺序都能注�
 **VMware Tools 未安装时哪些命令受影响**
 - `vm ip`：立即失败；加 `-w` 会阻塞等待 Tools 就绪
 - `vm down` / `vm reset`（soft）：失败，确认无未保存数据后可改 `vm kill`（hard，不需要 Tools）
-- `vm status` 的 Tools 列：显示 `unknown`
+- `vm status` 的 Tools 列：显示 `未知`（挂起或未开机时查不到）
 - 电源、快照、克隆、删除不依赖 Tools
 
 **删除 VM_DIR 之外的 VM**

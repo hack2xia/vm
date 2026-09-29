@@ -136,7 +136,7 @@ ok() {  # ok <描述>，检查紧邻上一条命令的退出码
 
 # ── 发现 ─────────────────────────────────────────────────────────
 _vm_p -P "%F{cyan}== 发现 ==%f"
-out="$(vm vms 2>&1)"
+out="$(vm scan 2>&1)"
 chk "清单+目录共发现 5 台（冲突的镜像 Debian 不计入）" "已发现 5 台"
 chk "目录外 VM 纳入" "Debian"
 chk "短名取磁盘大小写（Kali Linux）" "Kali Linux"
@@ -147,26 +147,45 @@ chk "冲突时保留排序靠前的清单条目路径" "$T/other/Debian.vmwarevm
 # CJK 显示宽：宽字符按 2 列计
 eq "_vm_dispwidth 中文按 2 列" "4" "$(_vm_dispwidth '名字')"
 eq "_vm_dispwidth 混排" "3" "$(_vm_dispwidth '中a')"
-# vms 每行路径列起始的显示宽度必须一致（CJK 名/显示名不把列顶偏）
-out="$(vm vms 2>/dev/null)"
+# scan 表格（含表头）每行路径列起始的显示宽度必须一致（CJK 名/显示名不把列顶偏）
+out="$(vm scan 2>/dev/null)"
+chk "scan 有表头" "路径"
 prefws=()
 same=1
 for l in ${(f)out}; do
-  [[ "$l" == *"$T/"* && "$l" != *冲突路径* ]] || continue
-  pref="${l%%$T/*}"
+  if [[ "$l" == "  名称"* ]]; then
+    pref="${l%%路径*}"
+  elif [[ "$l" == *"$T/"* && "$l" != *冲突路径* ]]; then
+    pref="${l%%$T/*}"
+  else
+    continue
+  fi
   prefws+=($(_vm_dispwidth "$pref"))
 done
 (( ${#prefws} >= 2 )) || same=0
 w0="${prefws[1]}"
 for w in "${prefws[@]}"; do (( w == w0 )) || same=0; done
-eq "vms 各行路径列显示宽度一致（含 CJK 行）" "1" "$same"
+eq "scan 表头与各行路径列显示宽度一致（含 CJK 行）" "1" "$same"
 
 # ── status ───────────────────────────────────────────────────────
 _vm_p -P "%F{cyan}== status ==%f"
 out="$(vm status 2>&1)"
 chk "运行中（vmrun 回显与清单路径匹配）" "运行中"
-chk "paused 状态透出（清单附注）" "paused"
+chk "paused 状态透出（行内清单标注）" "（清单: paused）"
 chk "Tools 状态列中文化" "已安装"
+chk "status 有表头" "显示名"
+# 表头与数据行的 Tools 列起始显示宽度必须一致（CJK 名不顶偏；fake 恒返 installed）
+hpos=""
+same=1
+for l in ${(f)"$(vm status 2>/dev/null)"}; do
+  case "$l" in
+    "    名称"*) hpos=$(_vm_dispwidth "${l%%Tools*}") ;;
+    "  ● "*|"  ○ "*)
+      (( $(_vm_dispwidth "${l%%已安装*}") == hpos )) || same=0 ;;
+  esac
+done
+[[ -n "$hpos" ]] || same=0
+eq "status 表头 Tools 列与数据行对齐" "1" "$same"
 out="$(vm status 'KALI LINUX' 2>&1)"
 chk "单台大小写不敏感" "Kali Linux（Kali Linux 2024）"
 chk "显示名不被截断" "Kali Linux 2024）"
@@ -268,7 +287,7 @@ out="$(vm scan 2>&1)"
 chk "多 vmx 警告" "多个 .vmx"
 rm "$T/vms/WinSer2019.vmwarevm/Other.vmx"
 out="$(vm scan 2>&1)"
-chk "恢复后仍 5 台" "共发现 5 台"
+chk "恢复后仍 5 台" "已发现 5 台"
 
 # ── 失效清单路径 ─────────────────────────────────────────────────
 _vm_p -P "%F{cyan}== 失效清单路径 ==%f"
@@ -287,7 +306,7 @@ vmlist3.State = ""
 INV
 out="$(vm scan 2>&1)"
 chk "清单路径失效有警告" "路径失效"
-out="$(vm vms 2>&1)"
+out="$(vm scan 2>&1)"
 chk "失效后保留磁盘扫描的路径" "$T/vms/Kali Linux.vmwarevm/Kali Linux.vmx"
 chk "失效后仍 5 台" "已发现 5 台"
 
@@ -368,7 +387,7 @@ INV
 vm scan >"$T/scan.out" 2>"$T/scan.err"
 out="$(<$T/scan.err)"
 chk "inventory-only 失效路径也有警告" "路径失效"
-out="$(vm vms 2>&1)"
+out="$(vm scan 2>/dev/null)"   # 只看表格：stderr 的「路径失效」警告本身含 Phantom 路径
 [[ "$out" != *Phantom* ]]
 ok "失效清单条目不进入管理列表"
 
@@ -385,7 +404,7 @@ INV
 vm scan >"$T/scan.out" 2>"$T/scan.err"
 out="$(<$T/scan.err)"
 chk "磁盘 vs 清单首条同名触发冲突警告" "短名冲突"
-out="$(vm vms 2>&1)"
+out="$(vm scan 2>&1)"
 chk "保留磁盘扫描的路径，不再静默覆盖" "$T/vms/Debian.vmwarevm/Debian.vmx"
 out="$(vm kill Debian 2>&1)"; rc=$?
 eq "冲突短名拒绝 kill" "1" "$rc"
@@ -393,9 +412,9 @@ chk "kill 拒绝有提示" "拒绝执行"
 chk "拒绝时显示保留路径" "保留: "
 chk "拒绝时显示被隐藏的冲突路径" "$T/other2/Debian.vmwarevm/Debian.vmx"
 chk "拒绝时给出解决指引" "解决："
-out="$(vm vms 2>&1)"
-chk "vms 标记冲突并显示冲突路径" "冲突路径"
-chk "vms 显示全部冲突集合" "$T/other2/Debian.vmwarevm/Debian.vmx"
+out="$(vm scan 2>&1)"
+chk "scan 标记冲突并显示冲突路径" "冲突路径"
+chk "scan 显示全部冲突集合" "$T/other2/Debian.vmwarevm/Debian.vmx"
 out="$(vm snap delete Debian base 2>&1)"; rc=$?
 eq "冲突短名拒绝 snap delete" "1" "$rc"
 before=$(wc -l < "$T/calls.log")
@@ -426,7 +445,7 @@ vm scan >"$T/scan.out" 2>"$T/scan.err"
 out="$(<$T/scan.err)"
 chk "重复条目有警告" "重复条目"
 chk "UUID 一致者胜出（id 大的也能赢）" "UUID"
-out="$(vm vms 2>&1)"
+out="$(vm scan 2>&1)"
 chk "保留活条目的显示名" "Dup live"
 [[ "$out" != *"Dup stale"* ]]
 ok "陈尸条目不进入管理列表"
@@ -448,7 +467,7 @@ INV
 vm scan >"$T/scan.out" 2>"$T/scan.err"
 out="$(<$T/scan.err)"
 chk "无 UUID 时警告保留首个" "保留首个"
-out="$(vm vms 2>&1)"
+out="$(vm scan 2>&1)"
 chk "首个按 id 数值序（vmlist4 胜出）" "Dup first"
 # 收尾：恢复 test 3 的 Debian 冲突夹具，后续 delete/冲突用例依赖它
 rm -rf "$T/vms/Dup.vmwarevm"
@@ -499,8 +518,7 @@ chk "提示加 --yes" "--yes"
 out="$(vm delete 50%off --yes 2>&1)"; rc=$?
 eq "正常 VM --yes 删除 rc=0" "0" "$rc"
 chk "删除成功提示" "已删除 50%off"
-vm scan >/dev/null 2>&1
-out="$(vm vms 2>&1)"
+out="$(vm scan 2>&1)"
 [[ "$out" != *50%off* ]]
 ok "删除后重新扫描，VM 已不在列表"
 
@@ -575,7 +593,7 @@ eq "相对 VM_DIR 规范化为绝对路径（cd 后仍有效）" "$T/relv/Sub/Al
 #     （原 bug：%% 转义与颜色剥除相互作用，名字被 print -P 吃得只剩 oo）
 mkdir -p "$T/pctdir/%F{red}foo.vmwarevm"
 : > "$T/pctdir/%F{red}foo.vmwarevm/%F{red}foo.vmx"
-out="$(VM_DIR="$T/pctdir" VM_INVENTORY="$T/no-inv" zsh -c 'source "$1" 2>/dev/null; vm vms' _ "$VM_ZSH" 2>&1)"
+out="$(VM_DIR="$T/pctdir" VM_INVENTORY="$T/no-inv" zsh -c 'source "$1" 2>/dev/null; vm scan' _ "$VM_ZSH" 2>&1)"
 chk "名字含 %F{...} 时无色输出原样保留" "%F{red}foo"
 
 # 14. clone 新名禁止 - 开头；delete 支持 -- 透传，磁盘上已有的 - 名 VM 仍可管理
@@ -607,8 +625,6 @@ out="$(vm snap create 'kali linux' s1 typo 2>&1)"; rc=$?
 eq "vm snap create 多余参数 rc=1" "1" "$rc"
 out="$(vm clone 'kali linux' x full base typo 2>&1)"; rc=$?
 eq "vm clone 多余参数 rc=1" "1" "$rc"
-out="$(vm vms typo 2>&1)"; rc=$?
-eq "vm vms 多余参数 rc=1" "1" "$rc"
 out="$(vm scan typo 2>&1)"; rc=$?
 eq "vm scan 多余参数 rc=1" "1" "$rc"
 
@@ -619,7 +635,7 @@ eq "vmrun 缺失时 status rc=127" "127" "$rc"
 chk "缺失时提示查询失败" "无法查询运行状态"
 
 # 8. 非终端（命令替换/管道）输出不含 ANSI 颜色转义
-out="$(vm vms 2>&1)"
+out="$(vm scan 2>&1)"
 [[ "$out" != *$'\e['* ]]
 ok "非终端输出不含 ANSI 颜色转义"
 
@@ -697,8 +713,7 @@ vm scan >/dev/null 2>&1
 # 16. 名字含控制字符（ESC）：输出统一可见化（^[），终端注入被拆除
 mkdir -p "$T/vms/esc"$'\x1b'"x.vmwarevm"
 : > "$T/vms/esc"$'\x1b'"x.vmwarevm/esc"$'\x1b'"x.vmx" || die touch
-vm scan >/dev/null 2>&1
-out="$(vm vms 2>&1)"
+out="$(vm scan 2>&1)"
 [[ "$out" == *'esc^['* && "$out" != *$'\x1b'* ]]
 ok "ESC 可见化为 ^[，输出不含原始控制字节"
 rm -rf "$T/vms/esc"$'\x1b'"x.vmwarevm"
@@ -844,7 +859,7 @@ INV
   mkdir -p "$T/vms/%F{red}tty.vmwarevm"
   : > "$T/vms/%F{red}tty.vmwarevm/%F{red}tty.vmx" || die touch
   vm scan >/dev/null 2>&1
-  pty_run 'vm vms'
+  pty_run 'vm scan'
   [[ "$out" == *$'\e['* ]]
   ok "TTY 输出渲染 ANSI 颜色"
   [[ "$out" == *'%F{red}tty'* ]]

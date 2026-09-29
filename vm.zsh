@@ -27,7 +27,7 @@
 # ── 1. 版本 ─────────────────────────────────────────────────────
 # 与 CHANGELOG.md 保持一致；报障时 `vm version` + `vm doctor` 输出是最好的
 # 现场信息
-_VM_VERSION="0.1.4"
+_VM_VERSION="0.1.5"
 
 # ── 2. vmrun 解析（显式依赖，不走 PATH 优先级）──────────────────
 # VMRUN_BIN 是唯一会执行的 vmrun。默认解析为 Fusion 的绝对路径；PATH 追加
@@ -81,7 +81,7 @@ typeset -A VM_DISPLAY=()  # 短名 → Fusion 显示名
 typeset -A VM_STATE=()    # 短名 → 清单记录的状态（normal / paused …）
 typeset -A VM_LC=()       # 小写短名 → 短名，供大小写不敏感解析
 typeset -A VM_CONFLICT=() # 短名 → 冲突路径列表（换行分隔）：同名但路径不同的多台 VM
-                          # 无法区分，破坏性命令拒绝；路径列表供 vms/doctor 展示
+                          # 无法区分，破坏性命令拒绝；路径列表供 scan/doctor 展示
 
 # ── 4. 扫描：仅 source 末尾与 `vm scan` 时调用 ──────────────────
 vm_scan() {
@@ -433,10 +433,10 @@ _vm_dispwidth() {
   print -rn -- "$(( 1000 + ${#s} - ${#p} ))"
 }
 
-# 状态表格的一行：$1 = 短名，$2 = 圆点（含颜色），$3 = 运行状态，$4 = Tools 状态
-# $5/$6 = 名称列/显示名列的显示宽度（缺省 14）；padding 用 (mr:) 按屏幕列宽
-# 清单状态（VM_STATE）不进表格：normal/空是常态，占一列纯噪音，
-# 异常值由 status 在表格后集中附注
+# 状态表格的一行：$1 = 短名，$2 = 圆点（含颜色），$3 = 运行状态（清单异常已并入），
+# $4 = Tools 状态，$5/$6 = 名称列/显示名列的显示宽度（缺省 14）；padding 用 (mr:)
+# 按屏幕列宽。清单状态（VM_STATE）不占列：normal/空是常态，异常值由 status
+# 追加到电源列行尾
 _vm_status_line() {
   local n="$1" m="$2" s="$3" t="$4" nw="${5:-14}" dw="${6:-14}" a b d
   # 先按列宽补齐再安全化（% 转义 + 控制字符可见化）：顺序反了会让含 % 的
@@ -454,8 +454,7 @@ vm_help() {
 vm — VMware Fusion (headless) 管理
 
 虚拟机发现（手动扫描）:
-  vm scan              重新扫描（Fusion 清单 + 默认目录兜底）
-  vm vms               列出已发现的虚拟机（短名 + .vmx 路径）
+  vm scan              重新扫描并列出（Fusion 清单 + 默认目录兜底）
   vm doctor            环境体检：vmrun/路径/探活（只读诊断）
   vm list              列出正在运行的虚拟机（vmrun list）
   vm status [name]     查看状态：电源 / VMware Tools / 清单状态
@@ -614,18 +613,22 @@ vm() {
           (( wd > dw )) && dw=wd
         done
         _vm_p -P "%F{green}共 ${#VM_VMX} 台虚拟机：%f"
+        # 表头与数据行共用同一套列宽（mr: 按显示宽度补齐，CJK 不顶偏）；
+        # 首列 ●/○ 只是电源列的图形重复，不占表头。
+        # 字面量必须先存变量——${(mr:N:)名称} 会把「名称」当参数名展开
+        local h_name=名称 h_disp=显示名 h_tools=Tools
+        _vm_p -rP "    ${(mr:nw:)h_name} ${(mr:dw:)h_disp} ${(mr:8:)h_tools} 电源"
         for name in ${(ok)VM_VMX}; do
           if _vm_running "${VM_VMX[$name]}" "${running[@]}"; then
             mark="%F{green}●%f"; state="%F{green}运行中%f"
           else
             mark="%F{white}○%f"; state="未运行"
           fi
-          _vm_status_line "$name" "$mark" "$state" "$(_vm_tools "${VM_VMX[$name]}")" "$nw" "$dw"
-        done
-        # 清单状态 abnormal 值（orphaned/paused…）集中附注；normal/空不显示
-        for name in ${(ok)VM_VMX}; do
+          # 清单 abnormal 值（orphaned/paused…）并入行尾电源列：表后脚注与
+          # 行脱节要读者自己对名字；电源是最后一列，追加不破坏对齐
           [[ -n "${VM_STATE[$name]}" && "${VM_STATE[$name]}" != normal ]] && \
-            _vm_p -rP "  · 清单状态: %F{cyan}$(_vm_esc "$name")%f = $(_vm_esc "${VM_STATE[$name]}")（Fusion 库标记）"
+            state="$state（清单: $(_vm_esc "${VM_STATE[$name]}")）"
+          _vm_status_line "$name" "$mark" "$state" "$(_vm_tools "${VM_VMX[$name]}")" "$nw" "$dw"
         done
       fi
       ;;
@@ -721,7 +724,7 @@ vm() {
       _vm_maybe_destroy "$src" || return 1   # 冲突短名做源机：克隆出的可能是错的镜像
       # 短名被占用会导致克隆后两台 VM 无法区分，直接拒绝
       if [[ -n "${VM_LC[${newname:l}]}" ]]; then
-        _vm_p -P "%F{red}✗ 短名已被占用: $(_vm_esc "$newname")（vm vms 查看）%f" >&2
+        _vm_p -P "%F{red}✗ 短名已被占用: $(_vm_esc "$newname")（vm scan 查看）%f" >&2
         return 1
       fi
       # 注意：zsh 的 local 同一语句里后面的赋值展开时前面变量还未生效，必须分行
@@ -767,8 +770,7 @@ vm() {
       local rc=$?
       if (( rc == 0 )); then
         _vm_p -P "%F{green}✓ 克隆完成，重新扫描以纳入管理…%f"
-        vm_scan
-        vm vms
+        vm scan
       elif (( created_by_us )); then
         # 目录确系本命令创建（mkdir 占位成功）；失败时清掉残留，
         # 否则下次重试会被「目标已存在」挡住
@@ -869,8 +871,7 @@ vm() {
       rc=$?
       if (( rc == 0 )); then
         _vm_p -P "%F{green}✓ 已删除 $(_vm_esc "$name")，重新扫描…%f"
-        vm_scan
-        vm vms
+        vm scan
       fi
       return $rc
       ;;
@@ -879,9 +880,13 @@ vm() {
       _vm_need $# 0 'list' || return 1
       _vm_power list
       ;;
-    vms)
-      _vm_need $# 0 'vms' || return 1
-      (( ${#VM_VMX} )) || { _vm_p -P "%F{yellow}未发现任何虚拟机，执行: vm scan%f"; return 0; }
+    scan)
+      _vm_need $# 0 'scan' || return 1
+      vm_scan
+      if (( ! ${#VM_VMX} )); then
+        _vm_p -P "%F{yellow}✓ 扫描完成，未发现任何虚拟机%f"
+        return 0
+      fi
       local n p d h
       local -i nw=8 dw=8 wn wd
       for n in ${(k)VM_VMX}; do
@@ -889,7 +894,11 @@ vm() {
         (( wn > nw )) && nw=wn
         (( wd > dw )) && dw=wd
       done
-      _vm_p -P "%F{green}已发现 ${#VM_VMX} 台虚拟机：%f"
+      _vm_p -P "%F{green}✓ 扫描完成，已发现 ${#VM_VMX} 台虚拟机：%f"
+      # 表头与数据行共用同一套列宽；字面量必须先存变量
+      # （${(mr:N:)名称} 会把「名称」当参数名展开成空）
+      local h_name=名称 h_disp=显示名
+      _vm_p -rP "  ${(mr:nw:)h_name} ${(mr:dw:)h_disp} 路径"
       for n in ${(ok)VM_VMX}; do
         p="${VM_VMX[$n]}"
         d="$(_vm_esc "${(mr:dw:)VM_DISPLAY[$n]}")"   # 先补齐再安全化
@@ -902,11 +911,6 @@ vm() {
           done
         fi
       done
-      ;;
-    scan)
-      _vm_need $# 0 'scan' || return 1
-      vm_scan
-      _vm_p -P "%F{green}✓ 扫描完成，共发现 ${#VM_VMX} 台虚拟机%f"
       ;;
     doctor)
       # 只读体检：不改动任何状态，装完/升级后一次看清环境是否完整。
@@ -1020,8 +1024,7 @@ _vm_comp() {
         'clone:克隆虚拟机'
         'delete:永久删除（需确认）'
         'list:列出运行中的 VM'
-        'vms:列出已发现的 VM'
-        'scan:重新扫描'
+        'scan:重新扫描并列出'
         'doctor:环境体检（只读诊断）'
         'version:显示版本'
         'help:显示帮助'
