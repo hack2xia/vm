@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.1.7] - 2026-09-30
+
+`vm ip` 失败路径对因提示：区分 host 侧 Tools 状态卡住。
+
+### 新增
+- `vm ip` 取不到 IP 时补查一次 `checkToolsState` 区分病因：返回 `installed`（Tools 装了但 host 未确认其在运行）判定为 host 侧状态卡住——实测此场景 guest 内 vmtoolsd 健康、重启它无效，只能等 host 自愈；提示语点明病因并明确**勿用 `-w`**（-w 等的是同一个卡住的信号，会一直挂着），建议稍候重试或进 guest（ssh/GUI）自查。其余情况（未开机/未装 Tools）维持原提示不变。成功路径零改动；失败路径多一次 vmrun 调用。
+- 测试新增：installed 时给对因提示且不建议 -w、notInstalled 时维持原提示（fake vmrun 增加 `FAKE_TOOLS` 钩子）。断言总数 211。
+
 ## [0.1.6] - 2026-09-30
 
 `vm up` 失败路径对因提示：残留锁检测。

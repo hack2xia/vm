@@ -27,7 +27,7 @@
 # ── 1. 版本 ─────────────────────────────────────────────────────
 # 与 CHANGELOG.md 保持一致；报障时 `vm version` + `vm doctor` 输出是最好的
 # 现场信息
-_VM_VERSION="0.1.6"
+_VM_VERSION="0.1.7"
 
 # ── 2. vmrun 解析（显式依赖，不走 PATH 优先级）──────────────────
 # VMRUN_BIN 是唯一会执行的 vmrun。默认解析为 Fusion 的绝对路径；PATH 追加
@@ -572,7 +572,17 @@ vm() {
       local vmx; vmx=$(_vm_resolve "$1") || return 1
       local ip; ip=$(_vm_ip "$vmx" "$_vm_waitflag")
       if [[ -z "$ip" ]]; then
-        _vm_p -P "%F{yellow}✗ 未拿到 IP：VM 可能未开机或 VMware Tools 未就绪；可加 -w 等待%f" >&2
+        # 失败时补查一次 Tools 状态区分病因：installed = Tools 装了但 host
+        # 未确认其在运行——guest 多半健康，是 host 侧状态卡住（实测重启 guest
+        # 内 vmtoolsd 无效，只能等 host 自愈）；此时 -w 等的是同一个卡住的
+        # 信号，会一直挂着，不能建议
+        local tools; tools=$(_vmrun checkToolsState "$vmx" 2>/dev/null)
+        if [[ "$tools" == installed ]]; then
+          _vm_p -P "%F{yellow}✗ 未拿到 IP：Tools 已安装但 host 侧尚未确认其运行（状态卡住，重启 guest 内 vmtoolsd 无效）%f" >&2
+          _vm_p -P "%F{yellow}  勿用 -w（会一直等）；可稍候重试，或进 guest（ssh/GUI）自行查 IP%f" >&2
+        else
+          _vm_p -P "%F{yellow}✗ 未拿到 IP：VM 可能未开机或 VMware Tools 未就绪；可加 -w 等待%f" >&2
+        fi
         return 1
       fi
       _vm_p -rP -- "$ip"     # stdout 只有 IP，可被 $( ) 捕获（IP 已过合法性校验）

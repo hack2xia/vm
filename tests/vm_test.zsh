@@ -55,7 +55,7 @@ vmlist5.State = "normal"
 INV
 
 write_vmrun() {
-  # 环境开关（需 export）：FAKE_IP / FAKE_IP_ERR / FAKE_SNAP_FAIL / FAKE_STOP_FAIL / FAKE_START_FAIL
+  # 环境开关（需 export）：FAKE_IP / FAKE_IP_ERR / FAKE_TOOLS / FAKE_SNAP_FAIL / FAKE_STOP_FAIL / FAKE_START_FAIL
   # 每次调用把 argv 逐参数记进 calls.log（| 分隔）供契约断言
   cat <<FAKE > "$T/vmrun" || die vmrun
 #!/bin/zsh
@@ -70,7 +70,7 @@ case "\$sub" in
     # 供「交互确认期间 VM 被启动」场景使用（zpty 测试在确认中途写入该文件）。
     # 必须用 if/fi：[[ -f ]] && cat 短路会让 fake 在钩子缺失时退出码变 1
     if [[ -f "$T/extra-running" ]]; then cat "$T/extra-running"; fi ;;
-  checkToolsState) echo "installed" ;;
+  checkToolsState) echo "\${FAKE_TOOLS:-installed}" ;;
   getGuestIPAddress)
     if [[ -n "\$FAKE_IP_ERR" ]]; then
       echo "Error: The VMware Tools are not running (10.0.0.1)"; exit 1
@@ -202,6 +202,17 @@ _vm_p -P "%F{cyan}== ip ==%f"
 FAKE_IP=""
 out="$(vm ip 'kali linux' 2>&1)"
 chk "未拿到 IP 提示" "未拿到 IP"
+# fake 默认 checkToolsState=installed（Tools 装了但 host 未确认运行）：
+# 走对因提示分支——点明 host 状态卡住，且不得建议 -w（等的是同一卡住信号）
+chk "Tools 卡住时给对因提示" "状态卡住"
+chk "该场景明确勿用 -w" "勿用 -w"
+[[ "$out" != *"可加 -w 等待"* ]]
+ok "该场景不再建议 -w"
+FAKE_TOOLS=notInstalled
+export FAKE_TOOLS
+out="$(vm ip 'kali linux' 2>&1)"
+unset FAKE_TOOLS
+chk "Tools 未安装时维持原提示" "可加 -w 等待"
 FAKE_IP="999.999.999.999"
 export FAKE_IP
 out="$(vm ip 'kali linux' 2>/dev/null)"; rc=$?
