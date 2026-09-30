@@ -55,7 +55,7 @@ vmlist5.State = "normal"
 INV
 
 write_vmrun() {
-  # 环境开关（需 export）：FAKE_IP / FAKE_IP_ERR / FAKE_SNAP_FAIL / FAKE_STOP_FAIL
+  # 环境开关（需 export）：FAKE_IP / FAKE_IP_ERR / FAKE_SNAP_FAIL / FAKE_STOP_FAIL / FAKE_START_FAIL
   # 每次调用把 argv 逐参数记进 calls.log（| 分隔）供契约断言
   cat <<FAKE > "$T/vmrun" || die vmrun
 #!/bin/zsh
@@ -85,7 +85,10 @@ case "\$sub" in
   stop)
     if [[ -n "\$FAKE_STOP_FAIL" ]]; then echo "Error: VMware Tools are not running in this VM"; exit 1; fi
     echo "fake vmrun: stop" ;;
-  start|suspend|pause|unpause|reset) echo "fake vmrun: \$sub" ;;
+  start)
+    if [[ -n "\$FAKE_START_FAIL" ]]; then echo "Error: Cannot open the disk. Module Disk power on failed."; exit 1; fi
+    echo "fake vmrun: \$sub" ;;
+  suspend|pause|unpause|reset) echo "fake vmrun: \$sub" ;;
   deleteVM)
     # 沙盒范围检查 fail-closed：任何指向沙盒外的删除路径一律拒绝
     case "\$4" in
@@ -318,6 +321,21 @@ out="$(vm down 'kali linux' 2>&1)"; rc=$?
 unset FAKE_STOP_FAIL
 chk "soft 关机失败指引 vm kill" "可改 vm kill"
 eq "down rc 透传" "1" "$rc"
+
+# up 失败 + .lck 残留 → 对因提示（锁目录逐个列出，指路不删锁）
+FAKE_START_FAIL=1
+export FAKE_START_FAIL
+mkdir -p "$T/vms/Kali Linux.vmwarevm/Kali Linux.vmx.lck"
+out="$(vm up 'kali linux' 2>&1)"; rc=$?
+chk "up 失败且有锁残留时给出提示" "残留锁目录"
+chk "锁目录路径原样列出" "Kali Linux.vmx.lck"
+chk "提示先确认未在运行再删" "vm list"
+eq "up 锁残留场景 rc 透传" "1" "$rc"
+rm -rf "$T/vms/Kali Linux.vmwarevm/Kali Linux.vmx.lck"
+out="$(vm up 'kali linux' 2>&1)"; rc=$?
+[[ "$out" != *"残留锁"* ]]
+ok "up 失败但无锁残留时不误报"
+unset FAKE_START_FAIL
 
 # 路径穿越：newname 含 / 或 . .. 必须拒绝，且不能在 VM_DIR 外创建任何东西
 out="$(vm clone 'kali linux' ../outside full 2>&1)"; rc=$?

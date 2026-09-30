@@ -99,6 +99,9 @@ zsh 补全（子命令 / VM 短名 / 快照名）对两种加载顺序都能注�
 **「vmrun 不可用」**
 默认从 `/Applications/VMware Fusion.app` 解析 `vmrun` 的绝对路径。Fusion 装在别处或使用其他构建时，用 `VMRUN_BIN=/绝对路径/vmrun` 显式指定；`vm doctor` 显示的就是实际会执行的路径。
 
+**「启动失败且检测到残留锁目录」**
+`vm up` 失败且 VM 目录里存在 `.lck` 目录（vmrun 的报错 `Cannot open the disk …` 会误导人去查快照链，实际快照链通常是完好的）。这是上次异常退出留下的死锁：先确认虚拟机未在运行（`vm list`）且无 `vmware-vmx` 进程，然后删除列出的 `.lck` 目录再重试。脚本只提示、不代删——运行中的 VM 合法持有锁，误删会出事。GUI 与 `vm` 命令可以混用（同一 vmx 后端）：对已运行的 VM 执行 `vm up` 是幂等的，不会报错。
+
 **VMware Tools 未安装时哪些命令受影响**
 - `vm ip`：立即失败；加 `-w` 会阻塞等待 Tools 就绪
 - `vm down` / `vm reset`（soft）：失败，确认无未保存数据后可改 `vm kill`（hard，不需要 Tools）

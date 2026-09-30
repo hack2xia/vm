@@ -27,7 +27,7 @@
 # ── 1. 版本 ─────────────────────────────────────────────────────
 # 与 CHANGELOG.md 保持一致；报障时 `vm version` + `vm doctor` 输出是最好的
 # 现场信息
-_VM_VERSION="0.1.5"
+_VM_VERSION="0.1.6"
 
 # ── 2. vmrun 解析（显式依赖，不走 PATH 优先级）──────────────────
 # VMRUN_BIN 是唯一会执行的 vmrun。默认解析为 Fusion 的绝对路径；PATH 追加
@@ -513,7 +513,25 @@ vm() {
     up)      _vm_need $# 1 'up <name>' || return 1
              local vmx; vmx=$(_vm_resolve "${1:-}") || return 1
              _vm_maybe_destroy "$1" || return 1   # 冲突短名：不知道会启动哪一台
-             _vm_power start "$vmx" nogui ;;
+             local rc
+             _vm_power start "$vmx" nogui
+             rc=$?
+             if (( rc != 0 )); then
+               # 启动失败且 bundle 内残留 .lck 目录：多为上次异常退出留下的死锁。
+               # vmrun 对此的报错（Cannot open the disk …）方向性误导（指向快照链），
+               # 故给出对因提示。只指路不删锁：删锁是破坏性动作，且运行中的 VM
+               # 合法持有锁，须由用户确认 VM 未在运行后手动清理
+               local -a locks=("${vmx:h}"/*.lck(N/))
+               if (( ${#locks} )); then
+                 _vm_p -P "%F{yellow}! 启动失败且检测到残留锁目录（疑似上次异常退出）：%f" >&2
+                 local lk
+                 for lk in "$locks[@]"; do
+                   _vm_p -rP "    $(_vm_esc "$lk")" >&2
+                 done
+                 _vm_p -P "    确认虚拟机未在运行（vm list）且无 vmware-vmx 进程后，删除上述目录再重试%f" >&2
+               fi
+               return $rc
+             fi ;;
     down)    _vm_need $# 1 'down <name>' || return 1
              local vmx; vmx=$(_vm_resolve "${1:-}") || return 1
              _vm_maybe_destroy "$1" || return 1
