@@ -230,3 +230,23 @@ DictionaryLoad: Cannot open file "/Applications/VMware Fusion.app/Contents/Libra
 - `/tmp/alma_boot_probe.sh` → 软关机 + 开机 + 每 10s 采样，日志 `/tmp/alma_boot_probe.log`
 - `/tmp/alma_resume_probe.sh` → suspend(hard) + resume + 每 2s 采样，日志 `/tmp/alma_resume_probe.log`
 - `/tmp/alma_vmtools_watch.sh` → 每 2s 采样、检测到翻转即退出，日志 `/tmp/alma_vmtools_restart.log`
+
+---
+
+## 9. 附：2026-10-10 winser2019——Tools 未安装是同一症状的另一根因
+
+alma10 之外，`vm ip` 拿不到 IP 还有另一种完全不同的病因：**guest 里从来没装过 VMware Tools**。现象与本文档第 2 节几乎一样，容易误判成 host 侧卡住；本次实例记录如下，供下次先做区分。
+
+**现象**：`vm up` 成功，但 `vm ip` 失败、`vm ip -w` 永久挂起、`vm down`（stop soft）干等（vmware.log 里每分钟一次 `GuestRpcSendTimedOut`）。
+**与 alma 故障的区分**：`vm status` 的 Tools 列是 **`未知`**（alma 是 `已安装`）；`checkToolsState` 返回 `unknown`（rc=254）。
+
+**host 侧判据（分钟级）**：
+- vmx 日志自报 `VMXVmdb_SetToolsVersionStatus: 'noTools'`，且全程没有 `tools.set.versiontype`、没有 heartbeat（alma 故障至少收到过 heartbeat）
+- guest 网络侧证据：ARP 表里有 guest（静态 IP，所以 DHCP 租约文件里反而查不到）、ping 通、SMB/WinRM/RPC 端口开——**guest 本身健康，只是没有 Tools**；CPU/磁盘高是 Defender 首扫，与故障无关
+- vmx 里 `softPowerOff=FALSE`/`cleanShutdown=FALSE`：Tools 握手从未完成的结果，非原因
+
+**guest 侧判据（一句话实锤）**：ssh 进 guest（本例 `administrator@192.168.7.148`，静态 IP）后无 VMTools 服务、无 VMware 卸载项、`C:\Program Files\VMware\VMware Tools\vmtoolsd.exe` 不存在。
+
+**处置**：`vmrun -T fusion installTools <vmx>` 挂载 Tools ISO（headless 不会自启安装器，guest 里看到 D: 有介质但无进程），再经 ssh 在 guest 内跑 `D:\setup.exe /S /v"/qn REBOOT=R"` 静默安装（约 1 分钟；安装器退出码 194 但实际成功，以文件和服务为准）。服务起来后 host 侧数秒内 `checkToolsState=running`，`vm ip` 恢复。不需要 Tools 的干净关机路径：ssh 进 guest 执行 `shutdown /s /t 0`。
+
+**对 vm.zsh 的影响**：0.1.8 起 `vm ip` 失败提示区分 notInstalled/unknown（不再无脑建议 `-w`）；`vm down` 在 VM 运行而 Tools 未运行时快速失败（预检 `checkToolsState`），不再陪 vmrun 干等。

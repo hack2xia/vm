@@ -536,6 +536,21 @@ vm() {
              local vmx; vmx=$(_vm_resolve "${1:-}") || return 1
              _vm_maybe_destroy "$1" || return 1
              local rc
+             # soft 关机靠 guest 内 Tools 回 RPC 确认；Tools 没在跑时 vmrun 不报错
+             # 也不退出，每分钟一次 RPC 超时反复重试（实测 10 分钟以上不撒手）。
+             # VM 在运行而 Tools 未运行时先快速失败指路，不陪它干等。VM 没在运行
+             # 时 vmrun 自己立刻报 not powered on，无需预检；list 查询失败按未运行
+             # 处理只是跳过预检，stop 仍会拿到 vmrun 自己的错误，不会误判
+             local -a running
+             running=(${${(f)"$(_vmrun list 2>/dev/null)"}:#Total running VMs:*})
+             if _vm_running "$vmx" "${running[@]}"; then
+               local t; t="$(_vmrun checkToolsState "$vmx" 2>/dev/null)"
+               if [[ "$t" != running ]]; then
+                 _vm_p -P "%F{yellow}! 未执行 soft 关机：VM 在运行，但 VMware Tools 未在运行（状态: $(_vm_esc "${t:-未知}")）%f" >&2
+                 _vm_p -P "%F{yellow}  soft 关机需要 Tools；可进 guest 执行 shutdown（不需要 Tools），或确认无未保存数据后 vm kill $(_vm_esc "$1")%f" >&2
+                 return 1
+               fi
+             fi
              _vm_power stop "$vmx" soft
              rc=$?
              (( rc != 0 )) && _vm_p -P "%F{yellow}! soft 关机失败：常见原因是未装/未启动 VMware Tools（vm status 可查）；确认无未保存数据后可改 vm kill $(_vm_esc "$1") 强制断电%f" >&2
@@ -572,16 +587,24 @@ vm() {
       local vmx; vmx=$(_vm_resolve "$1") || return 1
       local ip; ip=$(_vm_ip "$vmx" "$_vm_waitflag")
       if [[ -z "$ip" ]]; then
-        # 失败时补查一次 Tools 状态区分病因：installed = Tools 装了但 host
-        # 未确认其在运行——guest 多半健康，是 host 侧状态卡住（实测重启 guest
-        # 内 vmtoolsd 无效，只能等 host 自愈）；此时 -w 等的是同一个卡住的
-        # 信号，会一直挂着，不能建议
+        # 失败时补查一次 Tools 状态区分病因：
+        # installed = Tools 装了但 host 未确认其在运行——guest 多半健康，是 host
+        #   侧状态卡住（实测重启 guest 内 vmtoolsd 无效，只能等 host 自愈）；
+        #   此时 -w 等的是同一个卡住的信号，会一直挂着，不能建议
+        # notInstalled = guest 里没有 Tools——没有就没有 IP 可拿，-w 等不到，
+        #   须先安装（Fusion GUI 或 vmrun installTools）
+        # unknown = host 侧区分不了「VM 没开机/guest 还在启动」（-w 有效）和
+        #   「Tools 缺失」（-w 无效）：两种可能都写明，按 guest 实况判断
         local tools; tools=$(_vmrun checkToolsState "$vmx" 2>/dev/null)
         if [[ "$tools" == installed ]]; then
           _vm_p -P "%F{yellow}✗ 未拿到 IP：Tools 已安装但 host 侧尚未确认其运行（状态卡住，重启 guest 内 vmtoolsd 无效）%f" >&2
           _vm_p -P "%F{yellow}  勿用 -w（会一直等）；可稍候重试，或进 guest（ssh/GUI）自行查 IP%f" >&2
+        elif [[ "$tools" == notInstalled ]]; then
+          _vm_p -P "%F{yellow}✗ 未拿到 IP：VMware Tools 未安装——没有 Tools 就没有 IP 可拿，-w 等不到%f" >&2
+          _vm_p -P "%F{yellow}  安装：Fusion GUI「安装 VMware Tools」，或 vmrun -T fusion installTools <vmx>（host 侧数秒内可认）%f" >&2
         else
-          _vm_p -P "%F{yellow}✗ 未拿到 IP：VM 可能未开机或 VMware Tools 未就绪；可加 -w 等待%f" >&2
+          _vm_p -P "%F{yellow}✗ 未拿到 IP：Tools 状态未知——VM 未开机或 guest 启动中可 -w 等；guest 已就绪仍如此则多为未安装 Tools，-w 等不到%f" >&2
+          _vm_p -P "%F{yellow}  安装 Tools：Fusion GUI「安装 VMware Tools」，或 vmrun -T fusion installTools <vmx>%f" >&2
         fi
         return 1
       fi

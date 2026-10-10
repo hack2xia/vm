@@ -212,7 +212,18 @@ FAKE_TOOLS=notInstalled
 export FAKE_TOOLS
 out="$(vm ip 'kali linux' 2>&1)"
 unset FAKE_TOOLS
-chk "Tools 未安装时维持原提示" "可加 -w 等待"
+chk "Tools 未安装时明示 -w 等不到" "-w 等不到"
+chk "Tools 未安装时给安装途径" "installTools"
+[[ "$out" != *"可加 -w 等待"* ]]
+ok "该场景不再建议 -w"
+FAKE_TOOLS=unknown
+export FAKE_TOOLS
+out="$(vm ip 'kali linux' 2>&1)"
+unset FAKE_TOOLS
+chk "Tools 状态未知时两种可能都写明" "guest 已就绪"
+chk "未知场景也给安装途径" "installTools"
+[[ "$out" != *"可加 -w 等待"* ]]
+ok "未知场景不无脑建议 -w"
 FAKE_IP="999.999.999.999"
 export FAKE_IP
 out="$(vm ip 'kali linux' 2>/dev/null)"; rc=$?
@@ -326,12 +337,37 @@ chk "失效后仍 5 台" "已发现 5 台"
 
 # ── down / clone ─────────────────────────────────────────────────
 _vm_p -P "%F{cyan}== down / clone ==%f"
-FAKE_STOP_FAIL=1
-export FAKE_STOP_FAIL
+# VM 在运行 + Tools 未运行：预检快速失败，不真去调 stop（干了也是白干，会挂住）
+: > "$T/calls.log"
+FAKE_TOOLS=unknown
+export FAKE_TOOLS
 out="$(vm down 'kali linux' 2>&1)"; rc=$?
-unset FAKE_STOP_FAIL
-chk "soft 关机失败指引 vm kill" "可改 vm kill"
+unset FAKE_TOOLS
+chk "运行中 Tools 未运行时快速失败" "未执行 soft 关机"
+chk "快速失败指路 vm kill" "vm kill"
+eq "快速失败 rc=1" "1" "$rc"
+if grep -Fq "stop" "$T/calls.log"; then
+  _vm_p -P "  %F{red}FAIL%f: 预检失败不该调用 stop"; fail=1
+else
+  _vm_p -P "  %F{green}PASS%f: 预检失败未调用 stop"
+fi
+# Tools 运行中才真正调 stop；stop 失败走原指引（fake 的 FAKE_STOP_FAIL）
+: > "$T/calls.log"
+FAKE_TOOLS=running
+FAKE_STOP_FAIL=1
+export FAKE_TOOLS FAKE_STOP_FAIL
+out="$(vm down 'kali linux' 2>&1)"; rc=$?
+unset FAKE_TOOLS FAKE_STOP_FAIL
+chk "Tools 运行中才调 stop；失败指引 vm kill" "可改 vm kill"
 eq "down rc 透传" "1" "$rc"
+grep -Fq "stop" "$T/calls.log"
+ok "Tools 运行中时确实调用了 stop"
+# VM 未在运行（fake 运行清单里没有 winser2019）：跳过预检直接调 stop，
+# 由 vmrun 自己快速报错（真机实测关机态 stop soft 立即返回 not powered on）
+: > "$T/calls.log"
+out="$(vm down winser2019 2>&1)"; rc=$?
+grep -Fq "stop" "$T/calls.log"
+ok "未运行的 VM 跳过预检直接调 stop"
 
 # up 失败 + .lck 残留 → 对因提示（锁目录逐个列出，指路不删锁）
 FAKE_START_FAIL=1

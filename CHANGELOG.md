@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.1.8] - 2026-10-10
+
+`vm ip` 失败提示覆盖 Tools 未安装/未知；`vm down` 增加运行中 Tools 预检。
+
+### 新增
+- `vm ip` 取不到 IP 时的对因提示从两分支扩为三分支：`installed`（host 侧状态卡住，勿用 -w，0.1.7 已有）之外——`notInstalled` 明示「没有 Tools 就没有 IP 可拿，-w 等不到」并给安装途径（Fusion GUI「安装 VMware Tools」或 `vmrun -T fusion installTools <vmx>`）；`unknown`（host 侧区分不了「VM 没开机/guest 还在启动」与「Tools 缺失」）两种可能都写明、按 guest 实况判断，不再无脑建议「可加 -w 等待」。触发实例：winser2019 从未安装 Tools，`vm ip -w` 永久挂起。
+- `vm down`（stop soft）在 VM 运行而 Tools 未运行时快速失败：先 `vmrun list` 判运行（复用 `_vm_running` 的文件身份比对），再 `checkToolsState` 预检，未运行则打印状态并指路（进 guest 执行 shutdown——不需要 Tools；或确认无未保存数据后 `vm kill`），不真去调 stop。此前 vmrun 等 soft 关机的 Tools RPC 不报错也不退出（每分钟一次超时反复重试，实测 10 分钟以上），只能干等。VM 未在运行时跳过预检，stop 由 vmrun 自己立刻报 not powered on（真机实测）。`reset`（soft）未做同样预检，维持原行为。
+- 测试：ip 新增 notInstalled/unknown 分支断言（明示 -w 等不到、给安装途径、不再建议 -w）；down 新增三条路径断言（运行中 Tools 未运行→快速失败且不调 stop、Tools 运行中→真调 stop 且失败走原指引、未运行→跳过预检直接调 stop）。断言总数 221。
+- 真机冒烟（真实 vmrun）：kali（运行中+installed）ip 走卡住分支、down 快速失败且 VM 未被关；winser2019 关机态 ip/down 不卡；winser2019 启动中 down 快速失败。
+
 ## [0.1.7] - 2026-09-30
 
 `vm ip` 失败路径对因提示：区分 host 侧 Tools 状态卡住。

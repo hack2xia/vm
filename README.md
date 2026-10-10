@@ -102,9 +102,9 @@ zsh 补全（子命令 / VM 短名 / 快照名）对两种加载顺序都能注�
 **「启动失败且检测到残留锁目录」**
 `vm up` 失败且 VM 目录里存在 `.lck` 目录（vmrun 的报错 `Cannot open the disk …` 会误导人去查快照链，实际快照链通常是完好的）。这是上次异常退出留下的死锁：先确认虚拟机未在运行（`vm list`）且无 `vmware-vmx` 进程，然后删除列出的 `.lck` 目录再重试。脚本只提示、不代删——运行中的 VM 合法持有锁，误删会出事。GUI 与 `vm` 命令可以混用（同一 vmx 后端）：对已运行的 VM 执行 `vm up` 是幂等的，不会报错。
 
-**VMware Tools 未安装时哪些命令受影响**
-- `vm ip`：立即失败；加 `-w` 会阻塞等待 Tools 就绪
-- `vm down` / `vm reset`（soft）：失败，确认无未保存数据后可改 `vm kill`（hard，不需要 Tools）
+**VMware Tools 未安装/未运行时哪些命令受影响**
+- `vm ip`：立即失败，并按 Tools 状态给对因提示——未安装会明示 `-w` 等不到、指路安装；host 侧状态卡住则明确勿用 `-w`；状态未知时两种可能都写明。`-w` 只在 guest 启动过程中（Tools 稍后就绪）有意义
+- `vm down`（soft）：VM 在运行而 Tools 未运行时快速失败并指路（进 guest 执行 shutdown——不需要 Tools；或确认无未保存数据后 `vm kill` 硬断电），不再陪 vmrun 干等；`vm reset`（soft）仍会调用后失败
 - `vm status` 的 Tools 列：显示 `未知`（挂起或未开机时查不到）
 - 电源、快照、克隆、删除不依赖 Tools
 
