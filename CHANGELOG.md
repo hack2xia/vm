@@ -1,12 +1,21 @@
 # Changelog
 
+## [0.1.9] - 2026-10-11
+
+修正 0.1.8 `vm down` 预检的误拦：`installed` 放行，只拦 `notInstalled`/`unknown`。
+
+### 变更
+- `vm down` 预检从「Tools 状态 ≠ running 就快速失败」改为「仅 `notInstalled`/`unknown` 快速失败」。0.1.8 把 `installed` 也拦了，但 host 查询卡在 `installed` 而 guest 内 Tools 心跳正常的实例实测存在（2026-10-11 kali：vmx 日志 `tools.set.versiontype` 照收、无 heartbeat timeout，查询 13 分钟仍是 `installed`）——此时 soft 关机很可能会成功，拦截是把能用的关机弄坏，相对 v0.1.7 是 regression。`notInstalled`/`unknown` 仍快速失败：这两种状态下 guest 没有 Tools，soft 关机等 RPC 永不回应（2026-10-10 winser2019 实测挂 10 分钟以上）。
+- 测试：新增「installed 时不拦、放行并确实调用 stop」（0.1.8 回归的防线）；notInstalled/unknown 快速失败且不调 stop 改为参数化双状态断言。断言总数 228。
+- 真机验证（真实 vmrun 输出驱动的决策路径）：kali 与 winser2019（均运行中 + installed）均为放行。
+
 ## [0.1.8] - 2026-10-10
 
 `vm ip` 失败提示覆盖 Tools 未安装/未知；`vm down` 增加运行中 Tools 预检。
 
 ### 新增
 - `vm ip` 取不到 IP 时的对因提示从两分支扩为三分支：`installed`（host 侧状态卡住，勿用 -w，0.1.7 已有）之外——`notInstalled` 明示「没有 Tools 就没有 IP 可拿，-w 等不到」并给安装途径（Fusion GUI「安装 VMware Tools」或 `vmrun -T fusion installTools <vmx>`）；`unknown`（host 侧区分不了「VM 没开机/guest 还在启动」与「Tools 缺失」）两种可能都写明、按 guest 实况判断，不再无脑建议「可加 -w 等待」。触发实例：winser2019 从未安装 Tools，`vm ip -w` 永久挂起。
-- `vm down`（stop soft）在 VM 运行而 Tools 未运行时快速失败：先 `vmrun list` 判运行（复用 `_vm_running` 的文件身份比对），再 `checkToolsState` 预检，未运行则打印状态并指路（进 guest 执行 shutdown——不需要 Tools；或确认无未保存数据后 `vm kill`），不真去调 stop。此前 vmrun 等 soft 关机的 Tools RPC 不报错也不退出（每分钟一次超时反复重试，实测 10 分钟以上），只能干等。VM 未在运行时跳过预检，stop 由 vmrun 自己立刻报 not powered on（真机实测）。`reset`（soft）未做同样预检，维持原行为。
+- `vm down`（stop soft）在 VM 运行而 Tools 未运行时快速失败（**0.1.9 已修正：仅 `notInstalled`/`unknown` 拦截，`installed` 放行，见下**）：先 `vmrun list` 判运行（复用 `_vm_running` 的文件身份比对），再 `checkToolsState` 预检，未运行则打印状态并指路（进 guest 执行 shutdown——不需要 Tools；或确认无未保存数据后 `vm kill`），不真去调 stop。此前 vmrun 等 soft 关机的 Tools RPC 不报错也不退出（每分钟一次超时反复重试，实测 10 分钟以上），只能干等。VM 未在运行时跳过预检，stop 由 vmrun 自己立刻报 not powered on（真机实测）。`reset`（soft）未做同样预检，维持原行为。
 - 测试：ip 新增 notInstalled/unknown 分支断言（明示 -w 等不到、给安装途径、不再建议 -w）；down 新增三条路径断言（运行中 Tools 未运行→快速失败且不调 stop、Tools 运行中→真调 stop 且失败走原指引、未运行→跳过预检直接调 stop）。断言总数 221。
 - 真机冒烟（真实 vmrun）：kali（运行中+installed）ip 走卡住分支、down 快速失败且 VM 未被关；winser2019 关机态 ip/down 不卡；winser2019 启动中 down 快速失败。
 

@@ -536,17 +536,22 @@ vm() {
              local vmx; vmx=$(_vm_resolve "${1:-}") || return 1
              _vm_maybe_destroy "$1" || return 1
              local rc
-             # soft 关机靠 guest 内 Tools 回 RPC 确认；Tools 没在跑时 vmrun 不报错
+             # soft 关机靠 guest 内 Tools 回 RPC 确认；Tools 没有时 vmrun 不报错
              # 也不退出，每分钟一次 RPC 超时反复重试（实测 10 分钟以上不撒手）。
-             # VM 在运行而 Tools 未运行时先快速失败指路，不陪它干等。VM 没在运行
-             # 时 vmrun 自己立刻报 not powered on，无需预检；list 查询失败按未运行
-             # 处理只是跳过预检，stop 仍会拿到 vmrun 自己的错误，不会误判
+             # VM 在运行而 Tools 状态为 notInstalled/unknown 时先快速失败指路，
+             # 不陪它干等。installed 不拦：host 查询卡在 installed 但 guest 内
+             # 心跳正常的实例实测存在（2026-10-11 kali：versiontype 照收、无
+             # timeout，查询 13 分钟仍是 installed），此时 soft 关机很可能会
+             # 成功——拦了就是把能用的关机弄坏，按 v0.1.7 放行让 vmrun 自己试。
+             # VM 没在运行时 vmrun 自己立刻报 not powered on，无需预检；list
+             # 查询失败按未运行处理只是跳过预检，stop 仍会拿到 vmrun 自己的
+             # 错误，不会误判
              local -a running
              running=(${${(f)"$(_vmrun list 2>/dev/null)"}:#Total running VMs:*})
              if _vm_running "$vmx" "${running[@]}"; then
                local t; t="$(_vmrun checkToolsState "$vmx" 2>/dev/null)"
-               if [[ "$t" != running ]]; then
-                 _vm_p -P "%F{yellow}! 未执行 soft 关机：VM 在运行，但 VMware Tools 未在运行（状态: $(_vm_esc "${t:-未知}")）%f" >&2
+               if [[ "$t" == notInstalled || "$t" == unknown ]]; then
+                 _vm_p -P "%F{yellow}! 未执行 soft 关机：VM 在运行，但 VMware Tools 未安装或状态未知（状态: $(_vm_esc "$t")）%f" >&2
                  _vm_p -P "%F{yellow}  soft 关机需要 Tools；可进 guest 执行 shutdown（不需要 Tools），或确认无未保存数据后 vm kill $(_vm_esc "$1")%f" >&2
                  return 1
                fi

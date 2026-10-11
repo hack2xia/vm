@@ -104,7 +104,7 @@ zsh 补全（子命令 / VM 短名 / 快照名）对两种加载顺序都能注�
 
 **VMware Tools 未安装/未运行时哪些命令受影响**
 - `vm ip`：立即失败，并按 Tools 状态给对因提示——未安装会明示 `-w` 等不到、指路安装；host 侧状态卡住则明确勿用 `-w`；状态未知时两种可能都写明。`-w` 只在 guest 启动过程中（Tools 稍后就绪）有意义
-- `vm down`（soft）：VM 在运行而 Tools 未运行时快速失败并指路（进 guest 执行 shutdown——不需要 Tools；或确认无未保存数据后 `vm kill` 硬断电），不再陪 vmrun 干等；`vm reset`（soft）仍会调用后失败
+- `vm down`（soft）：VM 在运行而 Tools 未安装/状态未知时快速失败并指路（进 guest 执行 shutdown——不需要 Tools；或确认无未保存数据后 `vm kill` 硬断电），不再陪 vmrun 干等；Tools 已安装（哪怕 host 查询卡在 `installed`）时放行让 vmrun 自己试；`vm reset`（soft）仍会调用后失败
 - `vm status` 的 Tools 列：显示 `未知`（挂起或未开机时查不到）
 - 电源、快照、克隆、删除不依赖 Tools
 

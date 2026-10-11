@@ -337,20 +337,31 @@ chk "失效后仍 5 台" "已发现 5 台"
 
 # ── down / clone ─────────────────────────────────────────────────
 _vm_p -P "%F{cyan}== down / clone ==%f"
-# VM 在运行 + Tools 未运行：预检快速失败，不真去调 stop（干了也是白干，会挂住）
+# installed 不拦：host 查询卡在 installed 但 guest 内心跳正常的实例实测存在
+# （2026-10-11 kali），此时 soft 关机可能会成功——按 v0.1.7 放行让 vmrun 自己试
 : > "$T/calls.log"
-FAKE_TOOLS=unknown
-export FAKE_TOOLS
 out="$(vm down 'kali linux' 2>&1)"; rc=$?
-unset FAKE_TOOLS
-chk "运行中 Tools 未运行时快速失败" "未执行 soft 关机"
-chk "快速失败指路 vm kill" "vm kill"
-eq "快速失败 rc=1" "1" "$rc"
-if grep -Fq "stop" "$T/calls.log"; then
-  _vm_p -P "  %F{red}FAIL%f: 预检失败不该调用 stop"; fail=1
-else
-  _vm_p -P "  %F{green}PASS%f: 预检失败未调用 stop"
-fi
+eq "installed 时不拦、放行 soft 关机" "0" "$rc"
+grep -Fq "stop" "$T/calls.log"
+ok "installed 时确实调用了 stop"
+[[ "$out" != *"未执行 soft 关机"* ]]
+ok "installed 时无快速失败文案"
+# notInstalled / unknown：guest 没有 Tools，soft 关机等 RPC 永不回应，快速失败
+for _t in notInstalled unknown; do
+  : > "$T/calls.log"
+  FAKE_TOOLS=$_t
+  export FAKE_TOOLS
+  out="$(vm down 'kali linux' 2>&1)"; rc=$?
+  unset FAKE_TOOLS
+  chk "$_t 时快速失败" "未执行 soft 关机"
+  chk "$_t 时指路 vm kill" "vm kill"
+  eq "$_t 时 rc=1" "1" "$rc"
+  if grep -Fq "stop" "$T/calls.log"; then
+    _vm_p -P "  %F{red}FAIL%f: $_t 快速失败不该调用 stop"; fail=1
+  else
+    _vm_p -P "  %F{green}PASS%f: $_t 快速失败未调用 stop"
+  fi
+done
 # Tools 运行中才真正调 stop；stop 失败走原指引（fake 的 FAKE_STOP_FAIL）
 : > "$T/calls.log"
 FAKE_TOOLS=running

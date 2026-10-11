@@ -249,4 +249,7 @@ alma10 之外，`vm ip` 拿不到 IP 还有另一种完全不同的病因：**gu
 
 **处置**：`vmrun -T fusion installTools <vmx>` 挂载 Tools ISO（headless 不会自启安装器，guest 里看到 D: 有介质但无进程），再经 ssh 在 guest 内跑 `D:\setup.exe /S /v"/qn REBOOT=R"` 静默安装（约 1 分钟；安装器退出码 194 但实际成功，以文件和服务为准）。服务起来后 host 侧数秒内 `checkToolsState=running`，`vm ip` 恢复。不需要 Tools 的干净关机路径：ssh 进 guest 执行 `shutdown /s /t 0`。
 
-**对 vm.zsh 的影响**：0.1.8 起 `vm ip` 失败提示区分 notInstalled/unknown（不再无脑建议 `-w`）；`vm down` 在 VM 运行而 Tools 未运行时快速失败（预检 `checkToolsState`），不再陪 vmrun 干等。
+**对 vm.zsh 的影响**：0.1.8 起 `vm ip` 失败提示区分 notInstalled/unknown（不再无脑建议 `-w`）；`vm down` 在 VM 运行而 Tools 未安装/状态未知（`notInstalled`/`unknown`）时快速失败（预检 `checkToolsState`），不再陪 vmrun 干等。0.1.9 修正：`installed` 不拦——查询卡在 `installed` 但 guest 内心跳正常的实例（见下）soft 关机很可能可用，拦截是 regression。
+
+**第三种状态：查询卡在 `installed`，但 guest 内 Tools 心跳正常（2026-10-11 kali）**
+kali 冷启动 13 分钟后 `checkToolsState` 仍是 `installed`，但 vmx 日志里 `tools.set.versiontype` 照收、`[RunningStatus] Last heartbeat value 1`、无 heartbeat timeout——即 alma 文档 4.3 的判据（收到心跳）成立而查询依旧不翻 `running`。这修正了 alma 文档「只有 vmx 收到 heartbeat，checkToolsState 才可用」的模型：**心跳正常也可能查询卡死**。因此 `installed` 不能当作「soft 关机/-w 一定不可用」的判据，只能当作「未确认」；vm.zsh 的 `vm down` 预检据此只拦 `notInstalled`/`unknown`。
