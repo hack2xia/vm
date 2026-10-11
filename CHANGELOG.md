@@ -7,7 +7,7 @@
 ### 变更
 - `vm down` 预检从「Tools 状态 ≠ running 就快速失败」改为「仅 `notInstalled`/`unknown` 快速失败」。0.1.8 把 `installed` 也拦了，但 host 查询卡在 `installed` 而 guest 内 Tools 心跳正常的实例实测存在（2026-10-11 kali：vmx 日志 `tools.set.versiontype` 照收、无 heartbeat timeout，查询 13 分钟仍是 `installed`）——此时 soft 关机很可能会成功，拦截是把能用的关机弄坏，相对 v0.1.7 是 regression。`notInstalled`/`unknown` 仍快速失败：这两种状态下 guest 没有 Tools，soft 关机等 RPC 永不回应（2026-10-10 winser2019 实测挂 10 分钟以上）。
 - 测试：新增「installed 时不拦、放行并确实调用 stop」（0.1.8 回归的防线）；notInstalled/unknown 快速失败且不调 stop 改为参数化双状态断言。断言总数 228。
-- 真机验证（真实 vmrun 输出驱动的决策路径）：kali 与 winser2019（均运行中 + installed）均为放行。
+- 真机验证（真实 vmrun 输出驱动的决策路径）：kali 与 winser2019（均运行中 + installed）均为放行；`vm down kali` 全流程实测成功（stop soft rc=0，VM 干净关机）。
 
 ## [0.1.8] - 2026-10-10
 
